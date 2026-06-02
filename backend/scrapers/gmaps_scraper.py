@@ -102,6 +102,7 @@ class GMapsScraperV2:
             ]),
             locale="en-IN",
             timezone_id="Asia/Kolkata",
+            permissions=["geolocation"],
         )
         page = await ctx.new_page()
         try:
@@ -242,13 +243,13 @@ class GMapsScraperV2:
             await asyncio.sleep(random.uniform(1.0, 1.8))
 
             name = ""
-            for sel in ['h1.DUwDvf', '.fontHeadlineLarge', 'h1']:
+            for sel in ['h1.DUwDvf', '.fontHeadlineLarge', 'h1.qAWA2']:
                 el = await page.query_selector(sel)
                 if el:
                     name = (await el.inner_text()).strip()
-                    if name:
+                    if name and name.lower() != "results":
                         break
-            if not name:
+            if not name or name.lower() == "results":
                 return None, []
 
             phone = ""
