@@ -66,10 +66,18 @@ def build_xlsx(leads: list[dict]) -> bytes:
         row_fill = PatternFill("solid", fgColor=PRIORITY_COLORS.get(priority, "FFFFFFFF"))
         for col_idx, (_, field, _) in enumerate(COLUMNS, 1):
             value = lead.get(field) or ""
+            if field == "instagram_handle" and value:
+                value = f"https://instagram.com/{value}"
+                
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
             cell.fill = row_fill
-            cell.font = row_font
             cell.alignment = Alignment(vertical="center")
+            
+            if value and field in ["website", "instagram_handle", "google_maps_url"]:
+                cell.hyperlink = value
+                cell.font = Font(color="0000FF", underline="single", size=9)
+            else:
+                cell.font = row_font
 
     ws.freeze_panes = "A2"
 

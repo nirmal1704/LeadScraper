@@ -245,7 +245,12 @@ class GMapsScraperV2:
 
     async def _extract(self, page, listing, city: str, query: str):
         try:
-            await listing.click()
+            a_tag = await listing.query_selector('a')
+            if a_tag:
+                await a_tag.click()
+            else:
+                await listing.click()
+                
             await asyncio.sleep(random.uniform(1.0, 1.8))
 
             name = ""
@@ -342,7 +347,8 @@ class GMapsScraperV2:
             content = await page.content()
             # Look for instagram.com links in search results
             matches = re.findall(r'instagram\.com/([A-Za-z0-9_.]+)', content)
-            handles = [m for m in matches if m not in {"p", "explore", "reel", "stories", "tv", "accounts"}]
+            bad_words = {"p", "explore", "reel", "stories", "tv", "accounts", "invites", "oauth", "about", "developer"}
+            handles = [m for m in matches if m.lower() not in bad_words and len(m) > 2]
             if handles:
                 return True, handles[0]
             return False, None

@@ -84,6 +84,10 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         log(f"Cities: {', '.join(cities)}")
         log(f"Queries: {', '.join(queries[:5])}{'...' if len(queries) > 5 else ''}")
 
+        import random
+        random.shuffle(cities)
+        random.shuffle(queries)
+
         _set_status(db, user_id, job_id, "running", {"plan": plan})
 
         # ── 2. Execute Scraping ───────────────────────────────────────────────
@@ -103,11 +107,11 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         for query in queries:
                             if stop() or len(all_leads) >= max_leads: break
                             
-                            remaining_combos = total_combos - combos_done
-                            target = max(1, (max_leads - len(all_leads)) // remaining_combos) if remaining_combos > 0 else 1
-                            
+                            target_leads = max_leads - len(all_leads)
                             leads = await scraper.scrape_city(
-                                query=query, city=city, max_per_city=target, max_areas=max_areas
+                                query, city,
+                                max_per_city=target_leads, 
+                                max_areas=max_areas
                             )
                             score_leads_batch(leads)
                             all_leads.extend(leads)
@@ -135,11 +139,10 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         for query in queries:
                             if stop() or len(all_leads) >= max_leads: break
                             
-                            remaining_combos = total_combos - combos_done
-                            target = max(1, (max_leads - len(all_leads)) // remaining_combos) if remaining_combos > 0 else 1
+                            target_leads = max_leads - len(all_leads)
                             
                             leads = await scraper.scrape_domain(
-                                domain=source, query=query, city=city, max_leads=target
+                                domain=source, query=query, city=city, max_leads=target_leads
                             )
                             score_leads_batch(leads)
                             all_leads.extend(leads)
@@ -215,43 +218,39 @@ def _save_leads(db, user_id: str, job_id: str, leads: list[dict], overwrite: boo
         logger.error(f"Firestore batch write failed: {e}")
 
 
-def _global_worker():
-    """Runs continuously in the background, pulling jobs from the queue."""
-    while True:
-        job = _job_queue.get()
-        if job is None:
-            break
-        user_id, job_id, user_query, sources = job
+# Limit to 2 simultaneous scraping jobs to prevent Render OOM crashes
+MAX_CONCURRENT_JOBS = 2
+_job_semaphore = threading.Semaphore(MAX_CONCURRENT_JOBS)
+
+def _run_job_thread(user_id: str, job_id: str, user_query: str, sources: list[str]):
+    """Runs a single job in its own isolated thread and async loop."""
+    db = get_db()
+    
+    # If the server is full, this will safely pause until a slot opens
+    if _job_semaphore._value == 0:
+        _log(db, user_id, job_id, f"Server is at maximum capacity ({MAX_CONCURRENT_JOBS}/{MAX_CONCURRENT_JOBS} jobs running). You are in the waiting queue...")
         
-        # Mark as running right before we actually start
-        db = get_db()
+    with _job_semaphore:
         _set_status(db, user_id, job_id, "running")
-        _log(db, user_id, job_id, "Job pulled from queue. Starting execution...")
+        _log(db, user_id, job_id, "Server slot acquired! Starting execution...")
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(_run_async(user_id, job_id, user_query, sources))
         except Exception as e:
-            logger.error(f"Global worker error: {e}")
+            logger.error(f"Worker error: {e}")
         finally:
             loop.close()
-            _job_queue.task_done()
 
 def start_job(user_id: str, job_id: str, user_query: str, sources: list[str]):
-    """Add job to the queue, start worker if not running."""
-    global _worker_thread
+    """Launch a new job instantly without a global queue bottleneck."""
     _active_jobs[job_id] = False
     
-    # Let frontend know it's queued
     db = get_db()
     _set_status(db, user_id, job_id, "queued")
-    _log(db, user_id, job_id, "Job queued. Waiting for server resources...")
+    _log(db, user_id, job_id, "Job queued. Allocating server resources...")
     
-    _job_queue.put((user_id, job_id, user_query, sources))
-    
-    if _worker_thread is None or not _worker_thread.is_alive():
-        _worker_thread = threading.Thread(target=_global_worker, daemon=True)
-        _worker_thread.start()
-        
-    return _worker_thread
+    # Spawn a completely isolated thread for every user so they can run concurrently!
+    t = threading.Thread(target=_run_job_thread, args=(user_id, job_id, user_query, sources), daemon=True)
+    t.start()

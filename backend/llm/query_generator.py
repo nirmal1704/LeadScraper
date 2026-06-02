@@ -30,7 +30,7 @@ Rules:
 - Make search queries specific: prefer "Kathak dance classes" over just "dance".
 - CRITICAL: Return queries that a normal person would type into Google Maps to find a physical store (e.g. 'Coffee shops', 'Italian restaurants').
 - CRITICAL: DO NOT return informational queries like 'cafe menu ideas' or 'best cafe in India'.
-- CRITICAL: DO NOT include city names in the search_queries (e.g., output "yoga classes" NOT "yoga classes in Mumbai").
+- CRITICAL: DO NOT include city or country names in the search_queries (e.g., output "yoga classes" NOT "yoga classes in Mumbai" or "yoga in India").
 - CRITICAL: NEVER use the phrase "near me" in the search_queries. It breaks the geolocator.
 - Respond ONLY with valid JSON. No explanation. No markdown.
 """
