@@ -321,12 +321,12 @@ class GMapsScraperV2:
                     review_count = int(m.group(1).replace(",", ""))
 
             website = ""
-            # Try multiple selectors — GMaps renders this differently by listing type
+            # ONLY use selectors that are exclusive to the details panel!
+            # If we use generic 'aria-label="Website"', it accidentally grabs the website button 
+            # from the first card in the sidebar if the current business doesn't have one!
             for web_sel in [
                 'a[data-item-id="authority"]',
-                'a[aria-label*="website" i]',
-                'a[aria-label*="Website" i]',
-                'a[data-tooltip*="website" i]',
+                '[data-item-id="authority"] a'
             ]:
                 web_el = await page.query_selector(web_sel)
                 if web_el:

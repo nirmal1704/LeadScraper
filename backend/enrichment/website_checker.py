@@ -30,6 +30,11 @@ async def _check_one(client: httpx.AsyncClient, url: str) -> WebsiteResult:
     try:
         r = await client.get(url, timeout=TIMEOUT, follow_redirects=True)
         status = "Live" if r.status_code < 400 else "Down"
+        
+        # Check if the final destination actually uses HTTPS!
+        # Google Maps often provides "http://" even if the site securely redirects to HTTPS.
+        has_https = str(r.url).startswith("https://")
+        
         # Check for mobile viewport meta tag
         html = r.text[:5000]
         has_mobile = 'name="viewport"' in html or "name='viewport'" in html
