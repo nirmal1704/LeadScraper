@@ -165,14 +165,18 @@ class GMapsScraperV2:
                     area_queue.append(a)
                     new_discovered.append(a)
 
-            # Persist newly discovered areas to the database
+            # Persist newly discovered areas to the database (in a background thread to prevent freezing)
             if new_discovered and self.db:
-                try:
-                    ref = self.db.collection("geography").document("india").collection("cities").document(city)
-                    from google.cloud import firestore
-                    ref.set({"areas": firestore.ArrayUnion(new_discovered)}, merge=True)
-                except Exception as e:
-                    logger.error(f"Failed to save discovered areas to DB: {e}")
+                def _save_db():
+                    try:
+                        ref = self.db.collection("geography").document("india").collection("cities").document(city)
+                        from google.cloud import firestore
+                        ref.set({"areas": firestore.ArrayUnion(new_discovered)}, merge=True)
+                    except Exception as e:
+                        logger.error(f"Failed to save discovered areas to DB: {e}")
+                
+                import threading
+                threading.Thread(target=_save_db, daemon=True).start()
 
             # Force garbage collection between areas to free RAM
             import gc

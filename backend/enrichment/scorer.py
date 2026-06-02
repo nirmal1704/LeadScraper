@@ -2,6 +2,29 @@
 enrichment/scorer.py — Fixed scoring.
 No website = 90 = Hot. Always.
 """
+import re
+
+def normalize_socials(lead: dict):
+    """
+    If the website is actually a social media profile, move it to the correct column
+    and clear the website field so it gets scored properly as a Hot lead.
+    """
+    website = lead.get("website")
+    if not website:
+        return
+        
+    lower_site = website.lower()
+    if "instagram.com" in lower_site:
+        lead["has_instagram"] = True
+        m = re.search(r'instagram\.com/([^/]+)', website)
+        if m:
+            lead["instagram_handle"] = m.group(1)
+        lead["website"] = None
+    elif "facebook.com" in lower_site:
+        lead["website"] = None
+        # Could add facebook_handle here if needed
+    elif "youtube.com" in lower_site:
+        lead["website"] = None
 
 def score_lead(lead: dict) -> tuple[int, str]:
     """
@@ -26,12 +49,12 @@ def score_lead(lead: dict) -> tuple[int, str]:
         score = 90                          # No website at all — best lead
     elif website_status in ("Down", "Error", "Timeout", "Unknown"):
         score = 75                          # Site exists but broken
-    elif not has_https:
+    elif has_https is False:
         score = 65                          # HTTP only, no SSL
-    elif not has_mobile_meta:
+    elif has_mobile_meta is False:
         score = 50                          # Not mobile-friendly
     else:
-        score = 20                          # Working modern website
+        score = 20                          # Working modern website (or pending check)
 
     # ── Bonus signals ──────────────────────────────────────────────────────────
     if not website:
@@ -64,6 +87,7 @@ def score_lead(lead: dict) -> tuple[int, str]:
 def score_leads_batch(leads: list[dict]) -> list[dict]:
     """Score a list of lead dicts in place. Returns the same list."""
     for lead in leads:
+        normalize_socials(lead)
         score, priority = score_lead(lead)
         lead["score"] = score
         lead["priority"] = priority

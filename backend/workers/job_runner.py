@@ -99,11 +99,20 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         if stop(): break
                         for query in queries:
                             if stop(): break
+                            # Stop immediately if we hit the user's overall global limit
+                            if len(all_leads) >= max_leads:
+                                break
+                                
                             leads = await scraper.scrape_city(
                                 query=query, city=city, max_per_city=max_leads, max_areas=max_areas
                             )
+                            # Score leads immediately before saving so they show up correctly in UI
+                            score_leads_batch(leads)
                             all_leads.extend(leads)
                             _save_leads(db, user_id, job_id, leads)
+                            
+                            if len(all_leads) >= max_leads:
+                                break
                             
                         # Quick IG enrichment
                         city_leads = [l for l in all_leads if l["city"] == city and not l.get("website")]
@@ -125,13 +134,26 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         if stop(): break
                         for query in queries:
                             if stop(): break
+                            if len(all_leads) >= max_leads:
+                                break
+                                
                             leads = await scraper.scrape_domain(
                                 domain=source, query=query, city=city, max_leads=max_leads
                             )
+                            # Score immediately
+                            score_leads_batch(leads)
                             all_leads.extend(leads)
                             _save_leads(db, user_id, job_id, leads)
+                            
+                            if len(all_leads) >= max_leads:
+                                break
                 finally:
                     await scraper.stop()
+
+        if stop():
+            log("Job was stopped by user.")
+            _set_status(db, user_id, job_id, "stopped", {"leads_count": len(all_leads)})
+            return
 
         # ── 3. Website enrichment ─────────────────────────────────────────────
         log(f"Checking {len(all_leads)} websites...")
@@ -153,12 +175,21 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         # ── 5. Mark done ────────────────────────────────────────────────────
         hot_count = sum(1 for l in all_leads if l.get("priority") == "Hot")
         warm_count = sum(1 for l in all_leads if l.get("priority") == "Warm")
-        log(f"Done. {len(all_leads)} leads found — {hot_count} Hot, {warm_count} Warm")
-        _set_status(db, user_id, job_id, "done", {
-            "leads_count": len(all_leads),
-            "hot_count": hot_count,
-            "warm_count": warm_count,
-        })
+        
+        if stop():
+            log(f"Stopped early. {len(all_leads)} leads found.")
+            _set_status(db, user_id, job_id, "stopped", {
+                "leads_count": len(all_leads),
+                "hot_count": hot_count,
+                "warm_count": warm_count,
+            })
+        else:
+            log(f"Done. {len(all_leads)} leads found — {hot_count} Hot, {warm_count} Warm")
+            _set_status(db, user_id, job_id, "done", {
+                "leads_count": len(all_leads),
+                "hot_count": hot_count,
+                "warm_count": warm_count,
+            })
 
     except Exception as e:
         logger.exception(e)

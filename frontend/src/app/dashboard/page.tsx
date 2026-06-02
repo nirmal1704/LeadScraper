@@ -130,7 +130,7 @@ export default function Dashboard() {
 
 
   const isRunning = job?.status === 'running' || job?.status === 'queued';
-  const isDone = job?.status === 'done';
+  const isDone = job?.status === 'done' || job?.status === 'stopped';
 
   if (!user) return null;
 
