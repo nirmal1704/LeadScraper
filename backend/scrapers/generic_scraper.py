@@ -35,7 +35,10 @@ class GenericScraper:
                 "--no-sandbox",
                 "--disable-dev-shm-usage", 
                 "--disable-gpu",
-                "--js-flags=--max-old-space-size=64",
+                "--disable-webgl",
+                "--disable-3d-apis",
+                "--disable-software-rasterizer",
+                "--js-flags=--max-old-space-size=48",
             ],
         )
 

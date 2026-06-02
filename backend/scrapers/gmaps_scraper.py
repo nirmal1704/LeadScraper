@@ -81,7 +81,10 @@ class GMapsScraperV2:
                 "--no-sandbox",
                 "--disable-dev-shm-usage", 
                 "--disable-gpu",
-                "--js-flags=--max-old-space-size=64",
+                "--disable-webgl",
+                "--disable-3d-apis",
+                "--disable-software-rasterizer",
+                "--js-flags=--max-old-space-size=48",
             ],
         )
 
@@ -109,6 +112,8 @@ class GMapsScraperV2:
             
         # Block images and fonts to save RAM, but KEEP CSS (blocking CSS freezes GMaps)
         await page.route("**/*.{png,jpg,jpeg,woff,woff2,gif,webp}", lambda route: route.abort())
+        # Block the heavy Google Maps 3D vector tiles to stop the map from rendering and save massive RAM
+        await page.route("**/maps/vt/**", lambda route: route.abort())
         return page
 
     async def scrape_city(
