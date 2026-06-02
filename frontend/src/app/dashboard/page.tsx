@@ -132,6 +132,21 @@ export default function Dashboard() {
   const isRunning = job?.status === 'running' || job?.status === 'queued';
   const isDone = job?.status === 'done' || job?.status === 'stopped';
 
+  // Anti-Sleep Heartbeat: Ping the backend every 2 minutes while a job is running 
+  // so Render's free tier doesn't put the server to sleep!
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (isRunning) {
+      interval = setInterval(() => {
+        fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/health`)
+          .catch(() => {}); // ignore errors silently
+      }, 120000); // 2 minutes
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [isRunning]);
+
   if (!user) return null;
 
   return (

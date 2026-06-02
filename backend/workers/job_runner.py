@@ -87,6 +87,9 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         _set_status(db, user_id, job_id, "running", {"plan": plan})
 
         # ── 2. Execute Scraping ───────────────────────────────────────────────
+        total_combos = len(active_sources) * len(cities) * len(queries)
+        combos_done = 0
+
         for source in active_sources:
             if stop(): break
             
@@ -98,21 +101,18 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     for city in cities:
                         if stop(): break
                         for query in queries:
-                            if stop(): break
-                            # Stop immediately if we hit the user's overall global limit
-                            if len(all_leads) >= max_leads:
-                                break
-                                
+                            if stop() or len(all_leads) >= max_leads: break
+                            
+                            remaining_combos = total_combos - combos_done
+                            target = max(1, (max_leads - len(all_leads)) // remaining_combos) if remaining_combos > 0 else 1
+                            
                             leads = await scraper.scrape_city(
-                                query=query, city=city, max_per_city=max_leads, max_areas=max_areas
+                                query=query, city=city, max_per_city=target, max_areas=max_areas
                             )
-                            # Score leads immediately before saving so they show up correctly in UI
                             score_leads_batch(leads)
                             all_leads.extend(leads)
                             _save_leads(db, user_id, job_id, leads)
-                            
-                            if len(all_leads) >= max_leads:
-                                break
+                            combos_done += 1
                             
                         # Quick IG enrichment
                         city_leads = [l for l in all_leads if l["city"] == city and not l.get("website")]
@@ -133,20 +133,18 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     for city in cities:
                         if stop(): break
                         for query in queries:
-                            if stop(): break
-                            if len(all_leads) >= max_leads:
-                                break
-                                
+                            if stop() or len(all_leads) >= max_leads: break
+                            
+                            remaining_combos = total_combos - combos_done
+                            target = max(1, (max_leads - len(all_leads)) // remaining_combos) if remaining_combos > 0 else 1
+                            
                             leads = await scraper.scrape_domain(
-                                domain=source, query=query, city=city, max_leads=max_leads
+                                domain=source, query=query, city=city, max_leads=target
                             )
-                            # Score immediately
                             score_leads_batch(leads)
                             all_leads.extend(leads)
                             _save_leads(db, user_id, job_id, leads)
-                            
-                            if len(all_leads) >= max_leads:
-                                break
+                            combos_done += 1
                 finally:
                     await scraper.stop()
 

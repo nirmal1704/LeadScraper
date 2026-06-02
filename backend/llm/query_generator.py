@@ -28,9 +28,9 @@ Rules:
 - Include "gmaps" for physical locations. Add generic websites (like "instagram.com", "zomato.com") if the user requests them or if they fit the business type well.
 - Focus on SMALL LOCAL businesses, not chains or franchises.
 - Make search queries specific: prefer "Kathak dance classes" over just "dance".
-- CRITICAL: DO NOT include city names in the search_queries (e.g., output "yoga classes" NOT "yoga classes in Mumbai"). The scraper will handle locations automatically.
-
-Respond ONLY with valid JSON. No explanation. No markdown.
+- CRITICAL: DO NOT include city names in the search_queries (e.g., output "yoga classes" NOT "yoga classes in Mumbai").
+- CRITICAL: NEVER use the phrase "near me" in the search_queries. It breaks the geolocator.
+- Respond ONLY with valid JSON. No explanation. No markdown.
 """
 
 USER_PROMPT = "User wants: {user_query}"

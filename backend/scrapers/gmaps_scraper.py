@@ -155,7 +155,8 @@ class GMapsScraperV2:
             searched.add(area)
             areas_done += 1
 
-            leads, new_areas = await self._scrape_area(query, city, area, seen_hashes)
+            remaining_for_city = max_per_city - len(all_leads)
+            leads, new_areas = await self._scrape_area(query, city, area, seen_hashes, limit=remaining_for_city)
             all_leads.extend(leads)
 
             new_discovered = []
@@ -188,7 +189,7 @@ class GMapsScraperV2:
         return all_leads[:max_per_city]
 
     async def _scrape_area(
-        self, query: str, city: str, area: str, seen: set
+        self, query: str, city: str, area: str, seen: set, limit: int = 20
     ) -> tuple[list[dict], list[str]]:
         url = GMAPS_URL.format(query=quote(query), location=quote(area))
         self.progress(f"Searching '{query}' in {area}")
@@ -213,7 +214,7 @@ class GMapsScraperV2:
             self.progress(f"  {len(listings)} results in {area}")
 
             for listing in listings[:20]:
-                if self.stop_flag():
+                if self.stop_flag() or len(leads) >= limit:
                     break
                 try:
                     lead, areas = await self._extract(page, listing, city, query)
