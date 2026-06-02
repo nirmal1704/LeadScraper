@@ -11,7 +11,7 @@ import { startJob, stopJob, downloadExcel } from '@/lib/api';
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Job {
   id: string;
-  status: 'queued' | 'running' | 'done' | 'error';
+  status: 'queued' | 'running' | 'done' | 'error' | 'stopped';
   query: string;
   logs: string[];
   leads_count?: number;
