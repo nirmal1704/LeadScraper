@@ -260,27 +260,33 @@ class GMapsScraperV2:
             card_text = (await listing.inner_text()).strip()
             card_name = card_text.splitlines()[0].strip() if card_text else ""
 
-            a_tag = await listing.query_selector('a')
-            if a_tag:
-                await a_tag.click()
-            else:
-                await listing.click()
+            # Robustly click the card (force click on the top-left corner to avoid internal buttons)
+            await listing.click(force=True, position={'x': 15, 'y': 15})
                 
-            await asyncio.sleep(random.uniform(1.0, 1.8))
-
+            # Actively wait for the details panel to update to this specific business
             name = ""
-            for sel in ['h1.DUwDvf', '.fontHeadlineLarge', 'h1.qAWA2']:
-                el = await page.query_selector(sel)
-                if el:
-                    name = (await el.inner_text()).strip()
-                    if name and name.lower() != "results":
-                        break
-            if not name or name.lower() == "results":
+            for _ in range(15): # poll for up to 3 seconds
+                for sel in ['h1.DUwDvf', '.fontHeadlineLarge', 'h1.qAWA2']:
+                    el = await page.query_selector(sel)
+                    if el:
+                        current_name = (await el.inner_text()).strip()
+                        if current_name and current_name.lower() != "results":
+                            card_norm = _normalize_text(card_name)
+                            panel_norm = _normalize_text(current_name)
+                            if card_norm in panel_norm or panel_norm in card_norm:
+                                name = current_name
+                                break
+                if name:
+                    break
+                await asyncio.sleep(0.2)
+                
+            if not name:
+                # The details panel never opened, or the click failed.
                 return None, []
-
+                
             card_norm = _normalize_text(card_name)
             panel_norm = _normalize_text(name)
-            name_matches_card = bool(card_norm and (card_norm in panel_norm or panel_norm in card_norm))
+            name_matches_card = True
 
             # CRITICAL FIX: If the details panel name does not match the card name, it means the 
             # details panel failed to load (or we misclicked). We MUST abort extraction immediately 
