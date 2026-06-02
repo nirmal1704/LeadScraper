@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: leadscraper-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+      - key: FIREBASE_STORAGE_BUCKET
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://your-app.vercel.app
+    autoDeploy: true

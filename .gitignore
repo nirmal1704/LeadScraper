@@ -1,0 +1,39 @@
+# ── Environment files — NEVER commit these ─────────────────────────────────────
+.env
+.env.local
+.env.development
+.env.production
+.env.development.local
+.env.test.local
+.env.production.local
+backend/.env
+backend/serviceAccountKey.json
+
+# ── Python ──────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# ── Node / Next.js ──────────────────────────────────────────────────────────────
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/.vercel/
+*.tsbuildinfo
+next-env.d.ts
+
+# ── SQLite / local DB ───────────────────────────────────────────────────────────
+*.db
+*.sqlite
+
+# ── System ──────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.log
