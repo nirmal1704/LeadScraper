@@ -1,6 +1,6 @@
 import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { Auth, getAuth, GoogleAuthProvider } from 'firebase/auth';
+import { Firestore, getFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey:            process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -39,6 +39,7 @@ export function getGoogleProvider() {
 }
 
 // Convenience re-exports for components that are always client-side
-export const auth          = typeof window !== 'undefined' ? getFirebaseAuth() : null as any;
-export const db            = typeof window !== 'undefined' ? getFirebaseDb()   : null as any;
-export const googleProvider = typeof window !== 'undefined' ? getGoogleProvider() : null as any;
+export const auth: Auth = typeof window !== 'undefined' ? getFirebaseAuth() : (null as unknown as Auth);
+export const db: Firestore = typeof window !== 'undefined' ? getFirebaseDb() : (null as unknown as Firestore);
+export const googleProvider: GoogleAuthProvider =
+  typeof window !== 'undefined' ? getGoogleProvider() : (null as unknown as GoogleAuthProvider);

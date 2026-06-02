@@ -8,6 +8,7 @@ import asyncio
 import logging
 import threading
 import queue
+import math
 from datetime import datetime, timezone
 
 from firebase_config import get_db
@@ -74,12 +75,16 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         plan = generate_search_plan(user_query)
         cities = plan["cities"]
         queries = plan["search_queries"]
-        active_sources = plan["sources"]
+        active_sources = sources or plan["sources"]
+        if "gmaps" not in active_sources:
+            active_sources.insert(0, "gmaps")
         max_leads = plan.get("max_leads", 30)
         max_areas = plan.get("max_areas", 5)
 
         log(f"Plan ready — {len(cities)} cities, {len(queries)} terms, {len(active_sources)} sources")
-        log(f"Limits: {max_leads} leads/query, {max_areas} areas/query")
+        log(f"Limits: target {max_leads} leads total, {max_areas} areas per city/query")
+        if plan.get("free_tier_cap_applied"):
+            log("Free-tier cap applied: running a focused batch instead of an unstable 1000-lead scrape.")
         log(f"Sources: {', '.join(active_sources)}")
         log(f"Cities: {', '.join(cities)}")
         log(f"Queries: {', '.join(queries[:5])}{'...' if len(queries) > 5 else ''}")
@@ -91,7 +96,7 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         _set_status(db, user_id, job_id, "running", {"plan": plan})
 
         # ── 2. Execute Scraping ───────────────────────────────────────────────
-        total_combos = len(active_sources) * len(cities) * len(queries)
+        total_combos = max(1, len(active_sources) * len(cities) * len(queries))
         combos_done = 0
 
         for source in active_sources:
@@ -107,7 +112,7 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         for query in queries:
                             if stop() or len(all_leads) >= max_leads: break
                             
-                            target_leads = max_leads - len(all_leads)
+                            target_leads = _combo_budget(max_leads, len(all_leads), total_combos, combos_done)
                             leads = await scraper.scrape_city(
                                 query, city,
                                 max_per_city=target_leads, 
@@ -126,6 +131,10 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             if has_ig:
                                 lead["has_instagram"] = True
                                 lead["instagram_handle"] = handle
+                                lead["lead_type"] = "No website, Instagram found"
+                                lead["confidence"] = max(lead.get("confidence") or 0, 75)
+                        score_leads_batch(city_leads[:10])
+                        _save_leads(db, user_id, job_id, city_leads[:10], overwrite=True)
                 finally:
                     await scraper.stop()
             
@@ -139,7 +148,7 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         for query in queries:
                             if stop() or len(all_leads) >= max_leads: break
                             
-                            target_leads = max_leads - len(all_leads)
+                            target_leads = _combo_budget(max_leads, len(all_leads), total_combos, combos_done)
                             
                             leads = await scraper.scrape_domain(
                                 domain=source, query=query, city=city, max_leads=target_leads
@@ -162,6 +171,8 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         for lead in all_leads:
             result = website_results.get(lead.get("id"))
             if result:
+                lead["website"] = result.url
+                lead["website_domain"] = _domain_from_url(result.url)
                 lead["website_status"] = result.status
                 lead["has_https"] = result.has_https
                 lead["has_mobile_meta"] = result.has_mobile_meta
@@ -216,6 +227,22 @@ def _save_leads(db, user_id: str, job_id: str, leads: list[dict], overwrite: boo
         batch.commit()
     except Exception as e:
         logger.error(f"Firestore batch write failed: {e}")
+
+
+def _combo_budget(max_leads: int, collected: int, total_combos: int, combos_done: int) -> int:
+    remaining_leads = max(0, max_leads - collected)
+    if remaining_leads <= 0:
+        return 0
+    remaining_combos = max(1, total_combos - combos_done)
+    fair_share = math.ceil(remaining_leads / remaining_combos)
+    return min(remaining_leads, max(5, fair_share))
+
+
+def _domain_from_url(url: str) -> str | None:
+    from urllib.parse import urlparse
+
+    host = urlparse(url or "").netloc.lower().replace("www.", "")
+    return host or None
 
 
 # Limit to 2 simultaneous scraping jobs to prevent Render OOM crashes

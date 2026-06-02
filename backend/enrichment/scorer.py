@@ -1,41 +1,53 @@
 """
-enrichment/scorer.py — Fixed scoring.
-No website = 90 = Hot. Always.
+enrichment/scorer.py
+
+Scores leads for website-design outreach. No website remains the strongest signal,
+but every lead now also carries a plain-English lead_type and evidence trail.
 """
 import re
+from urllib.parse import urlparse
+
+
+def _domain(url: str) -> str | None:
+    host = urlparse(url or "").netloc.lower().replace("www.", "")
+    return host or None
+
 
 def normalize_socials(lead: dict):
     """
-    If the website is actually a social media profile, move it to the correct column
-    and clear the website field so it gets scored properly as a Hot lead.
+    If the website field is actually a social profile, move it out of website so
+    the lead is scored as website-less.
     """
     website = lead.get("website")
     if not website:
         return
-        
+
+    lead["website_domain"] = _domain(website)
     lower_site = website.lower()
     if "instagram.com" in lower_site:
         lead["has_instagram"] = True
-        m = re.search(r'instagram\.com/([^/]+)', website)
+        m = re.search(r"instagram\.com/([^/?#]+)", website)
         if m:
             lead["instagram_handle"] = m.group(1)
         lead["website"] = None
+        lead["website_domain"] = None
+        lead["lead_type"] = "Social profile only, no website"
     elif "facebook.com" in lower_site:
         lead["website"] = None
-        # Could add facebook_handle here if needed
+        lead["website_domain"] = None
+        lead["lead_type"] = "Social profile only, no website"
     elif "youtube.com" in lower_site:
         lead["website"] = None
+        lead["website_domain"] = None
+        lead["lead_type"] = "Video channel only, no website"
+
 
 def score_lead(lead: dict) -> tuple[int, str]:
     """
-    Score a lead 0–100 and assign priority.
+    Score a lead 0-100 and assign priority.
 
-    Priority thresholds:
-        Hot    ≥ 85   — No website, active business. Call today.
-        Warm   65–84  — Broken or insecure website. Easy redesign pitch.
-        Medium 45–64  — Has website, not mobile-friendly.
-        Cold   25–44  — Decent website. Low priority.
-        Skip    < 25  — Modern website. Don't bother.
+    Hot: no website. Warm: broken/insecure website. Medium: weak website.
+    Cold/Skip: lower likelihood of an easy website pitch.
     """
     website = lead.get("website")
     website_status = lead.get("website_status")
@@ -44,32 +56,34 @@ def score_lead(lead: dict) -> tuple[int, str]:
     has_instagram = lead.get("has_instagram", False)
     review_count = lead.get("review_count") or 0
 
-    # ── Base score ─────────────────────────────────────────────────────────────
     if not website:
-        score = 90                          # No website at all — best lead
+        score = 90
+        lead["lead_type"] = lead.get("lead_type") or "No website found"
     elif website_status in ("Down", "Error", "Timeout", "Unknown"):
-        score = 75                          # Site exists but broken
+        score = 75
+        lead["lead_type"] = "Website broken or unreachable"
     elif has_https is False:
-        score = 65                          # HTTP only, no SSL
+        score = 65
+        lead["lead_type"] = "Website has no HTTPS"
     elif has_mobile_meta is False:
-        score = 50                          # Not mobile-friendly
+        score = 50
+        lead["lead_type"] = "Website may not be mobile-friendly"
     else:
-        score = 20                          # Working modern website (or pending check)
+        score = 20
+        lead["lead_type"] = "Working website"
 
-    # ── Bonus signals ──────────────────────────────────────────────────────────
     if not website:
         if review_count >= 10:
-            score += 5   # Active business with real customers — great pitch
+            score += 5
         if has_instagram:
-            score += 3   # Digitally aware but website-less — easiest sell
+            score += 3
 
     if lead.get("has_zomato") or lead.get("has_swiggy"):
         if not website:
-            score += 4   # On delivery apps but no website — obvious gap
+            score += 4
 
     score = min(score, 100)
 
-    # ── Priority label ─────────────────────────────────────────────────────────
     if score >= 85:
         priority = "Hot"
     elif score >= 65:
@@ -80,6 +94,11 @@ def score_lead(lead: dict) -> tuple[int, str]:
         priority = "Cold"
     else:
         priority = "Skip"
+
+    lead["confidence"] = lead.get("confidence") or 40
+    if website_status:
+        evidence = [lead.get("evidence"), f"website status: {website_status}"]
+        lead["evidence"] = "; ".join([item for item in evidence if item])
 
     return score, priority
 

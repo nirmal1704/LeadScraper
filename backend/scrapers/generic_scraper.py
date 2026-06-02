@@ -11,6 +11,7 @@ import random
 import logging
 import uuid
 from urllib.parse import quote
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
@@ -18,6 +19,11 @@ from playwright_stealth import Stealth
 logger = logging.getLogger(__name__)
 
 GOOGLE_SEARCH_URL = "https://www.google.com/search?q={query}&hl=en&gl=in"
+
+
+def _display_domain(url: str) -> str | None:
+    host = urlparse(url or "").netloc.lower().replace("www.", "")
+    return host or None
 
 class GenericScraper:
     def __init__(self, progress_cb=None, stop_flag=None):
@@ -115,9 +121,17 @@ class GenericScraper:
                             "email": email_match.group(0).strip() if email_match else None,
                             "address": None,
                             "city": city,
+                            "area": None,
                             "query": query,
+                            "source_query": query,
+                            "source_city": city,
+                            "source_area": None,
                             "website": link,
+                            "website_domain": _display_domain(link),
                             "source": domain,
+                            "lead_type": f"{domain} profile/search result",
+                            "confidence": 45,
+                            "evidence": "found from Google search result snippet",
                             "priority": "Medium",
                             "score": 0,
                         }

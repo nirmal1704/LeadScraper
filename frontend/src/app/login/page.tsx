@@ -15,7 +15,7 @@ export default function LoginPage() {
     try {
       await signInWithPopup(auth, googleProvider);
       router.replace('/dashboard');
-    } catch (e: any) {
+    } catch {
       setError('Sign-in failed. Please try again.');
       setLoading(false);
     }

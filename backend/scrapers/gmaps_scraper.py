@@ -12,6 +12,7 @@ import random
 import logging
 import uuid
 from urllib.parse import quote
+from urllib.parse import urlparse
 from typing import Optional
 
 from playwright.async_api import async_playwright
@@ -62,6 +63,17 @@ def _extract_areas_from_address(address: str, city: str) -> list[str]:
                                      "delhi", "tamil nadu", "west bengal", "gujarat"}:
                 areas.append(part)
     return areas[:2]
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def _display_domain(url: str) -> Optional[str]:
+    if not url:
+        return None
+    host = urlparse(url).netloc.lower().replace("www.", "")
+    return host or None
 
 
 class GMapsScraperV2:
@@ -224,7 +236,7 @@ class GMapsScraperV2:
                 if self.stop_flag() or len(leads) >= limit:
                     break
                 try:
-                    lead, areas = await self._extract(page, listing, city, query)
+                    lead, areas = await self._extract(page, listing, city, area, query)
                     if lead:
                         h = f"{lead['name'].lower()}{lead.get('phone','')}{city.lower()}"
                         if h not in seen:
@@ -243,8 +255,11 @@ class GMapsScraperV2:
 
         return leads, list(set(new_areas))
 
-    async def _extract(self, page, listing, city: str, query: str):
+    async def _extract(self, page, listing, city: str, area: str, query: str):
         try:
+            card_text = (await listing.inner_text()).strip()
+            card_name = card_text.splitlines()[0].strip() if card_text else ""
+
             a_tag = await listing.query_selector('a')
             if a_tag:
                 await a_tag.click()
@@ -262,6 +277,10 @@ class GMapsScraperV2:
                         break
             if not name or name.lower() == "results":
                 return None, []
+
+            card_norm = _normalize_text(card_name)
+            panel_norm = _normalize_text(name)
+            name_matches_card = bool(card_norm and (card_norm in panel_norm or panel_norm in card_norm))
 
             phone = ""
             phone_el = await page.query_selector('[data-item-id*="phone"] .Io6YTe')
@@ -296,7 +315,6 @@ class GMapsScraperV2:
                 'a[aria-label*="website" i]',
                 'a[aria-label*="Website" i]',
                 'a[data-tooltip*="website" i]',
-                'a.CsEnBe[href^="http"]',
             ]:
                 web_el = await page.query_selector(web_sel)
                 if web_el:
@@ -306,17 +324,46 @@ class GMapsScraperV2:
                         website = href
                         break
 
+            confidence = 55
+            evidence = []
+            if name_matches_card:
+                confidence += 25
+                evidence.append("card name matched panel")
+            else:
+                evidence.append("card/panel name mismatch")
+            if phone:
+                confidence += 8
+                evidence.append("phone found")
+            if address and city.lower() in address.lower():
+                confidence += 8
+                evidence.append("address contains city")
+            if website:
+                confidence += 4
+                evidence.append("website found")
+            confidence = min(confidence, 100)
+
             return {
                 "name": name,
+                "place_name_from_card": card_name or None,
+                "place_name_from_panel": name,
+                "name_matches_card": name_matches_card,
                 "phone": phone or None,
                 "address": address or None,
                 "city": city,
+                "area": area,
                 "query": query,
+                "source_query": query,
+                "source_city": city,
+                "source_area": area,
                 "google_maps_url": page.url,
                 "website": website or None,
+                "website_domain": _display_domain(website),
                 "rating": rating,
                 "review_count": review_count,
                 "source": "Google Maps",
+                "lead_type": "Website found" if website else "No website on Google Maps",
+                "confidence": confidence,
+                "evidence": "; ".join(evidence),
                 # enrichment fields filled later
                 "website_status": None,
                 "has_https": None,

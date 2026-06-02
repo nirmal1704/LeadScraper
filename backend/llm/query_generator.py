@@ -7,11 +7,21 @@ into a structured scraping plan — no hardcoded cities, queries, or categories.
 import os
 import json
 import logging
+import re
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
 logger = logging.getLogger(__name__)
+
+FREE_TIER_MAX_LEADS = 250
+FREE_TIER_MAX_AREAS = 8
+
+KNOWN_CITY_NAMES = {
+    "mumbai", "delhi", "new delhi", "bangalore", "bengaluru", "hyderabad",
+    "chennai", "pune", "kolkata", "ahmedabad", "gurgaon", "gurugram",
+    "noida", "thane", "navi mumbai",
+}
 
 SYSTEM_PROMPT = """You are a lead generation expert helping find local Indian businesses.
 
@@ -32,6 +42,7 @@ Rules:
 - CRITICAL: DO NOT return informational queries like 'cafe menu ideas' or 'best cafe in India'.
 - CRITICAL: DO NOT include city or country names in the search_queries (e.g., output "yoga classes" NOT "yoga classes in Mumbai" or "yoga in India").
 - CRITICAL: NEVER use the phrase "near me" in the search_queries. It breaks the geolocator.
+- If the user asks for 1000+ leads, still return a practical free-tier batch size near 250.
 - Respond ONLY with valid JSON. No explanation. No markdown.
 """
 
@@ -79,12 +90,86 @@ def _validate_plan(plan: dict) -> dict:
         if k not in plan or not plan[k]:
             plan[k] = v
 
-    plan["cities"] = plan["cities"][:6]
-    plan["search_queries"] = plan["search_queries"][:12]
+    plan["cities"] = _clean_cities(plan["cities"])[:6] or defaults["cities"]
+    plan["search_queries"] = _clean_queries(plan["search_queries"], plan["cities"])[:12]
+    if not plan["search_queries"]:
+        plan["search_queries"] = defaults["search_queries"]
+    plan["sources"] = _clean_sources(plan["sources"])
+    plan["max_leads"] = _clamp_int(plan.get("max_leads"), 30, 5, FREE_TIER_MAX_LEADS)
+    plan["max_areas"] = _clamp_int(plan.get("max_areas"), 5, 1, FREE_TIER_MAX_AREAS)
+    plan["free_tier_cap_applied"] = plan["max_leads"] >= FREE_TIER_MAX_LEADS
+
     if "gmaps" not in plan["sources"]:
         plan["sources"].append("gmaps")
 
     return plan
+
+
+def _clean_cities(cities) -> list[str]:
+    if not isinstance(cities, list):
+        return []
+    cleaned = []
+    seen = set()
+    for city in cities:
+        city = str(city).strip()
+        if not city:
+            continue
+        if city.lower() == "bengaluru":
+            city = "Bangalore"
+        key = city.lower()
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(city)
+    return cleaned
+
+
+def _clean_queries(queries, cities) -> list[str]:
+    if not isinstance(queries, list):
+        return []
+    city_words = set(KNOWN_CITY_NAMES)
+    city_words.update(str(c).lower() for c in cities or [])
+    cleaned = []
+    seen = set()
+    for query in queries:
+        q = str(query).strip()
+        if not q:
+            continue
+        q = re.sub(r"\bnear\s+me\b", "", q, flags=re.I)
+        q = re.sub(r"\bin\s+india\b", "", q, flags=re.I)
+        for city in sorted(city_words, key=len, reverse=True):
+            q = re.sub(rf"\s+\bin\s+{re.escape(city)}\b", "", q, flags=re.I)
+            q = re.sub(rf"\b{re.escape(city)}\b", "", q, flags=re.I)
+        q = re.sub(r"\s+", " ", q).strip(" ,-")
+        if len(q) < 3:
+            continue
+        key = q.lower()
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(q)
+    return cleaned
+
+
+def _clean_sources(sources) -> list[str]:
+    if not isinstance(sources, list):
+        return ["gmaps"]
+    allowed = []
+    seen = set()
+    for source in sources:
+        s = str(source).lower().replace("https://", "").replace("http://", "").replace("www.", "").strip("/")
+        if s in {"google maps", "maps", "google"}:
+            s = "gmaps"
+        if s and s not in seen:
+            seen.add(s)
+            allowed.append(s)
+    return allowed or ["gmaps"]
+
+
+def _clamp_int(value, default: int, min_value: int, max_value: int) -> int:
+    try:
+        value = int(value)
+    except Exception:
+        value = default
+    return max(min_value, min(value, max_value))
 
 
 def _fallback_plan(user_query: str) -> dict:
@@ -93,7 +178,7 @@ def _fallback_plan(user_query: str) -> dict:
         "cities": ["Mumbai", "Bangalore", "Delhi"],
         "search_queries": [user_query.strip()[:60]],
         "sources": ["gmaps"],
-        "max_leads": 30,
+        "max_leads": 50,
         "max_areas": 5,
         "filters": [],
     }

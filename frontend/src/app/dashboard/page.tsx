@@ -1,10 +1,8 @@
 'use client';
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { onAuthStateChanged, signOut, User } from 'firebase/auth';
-import {
-  collection, doc, onSnapshot, orderBy, query, Timestamp,
-} from 'firebase/firestore';
+import { collection, doc, onSnapshot } from 'firebase/firestore';
 import { auth, db } from '@/lib/firebase';
 import { startJob, stopJob, downloadExcel } from '@/lib/api';
 
@@ -27,16 +25,25 @@ interface Lead {
   city: string;
   phone?: string;
   website?: string;
+  website_domain?: string;
   instagram_handle?: string;
   score: number;
   priority: 'Hot' | 'Warm' | 'Medium' | 'Cold' | 'Skip';
   query: string;
+  area?: string;
+  lead_type?: string;
+  confidence?: number;
+  evidence?: string;
   address?: string;
   google_maps_url?: string;
 }
 
 
 const PRIORITY_ORDER: Record<string, number> = { Hot: 0, Warm: 1, Medium: 2, Cold: 3, Skip: 4 };
+
+function messageFromError(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 export default function Dashboard() {
@@ -76,7 +83,11 @@ export default function Dashboard() {
     const leadsCol = collection(db, 'users', user.uid, 'jobs', currentJobId, 'leads');
     const unsub = onSnapshot(leadsCol, (snap) => {
       const items = snap.docs.map(d => ({ id: d.id, ...d.data() } as Lead));
-      items.sort((a, b) => (PRIORITY_ORDER[a.priority] ?? 5) - (PRIORITY_ORDER[b.priority] ?? 5));
+      items.sort((a, b) => {
+        const priority = (PRIORITY_ORDER[a.priority] ?? 5) - (PRIORITY_ORDER[b.priority] ?? 5);
+        if (priority !== 0) return priority;
+        return (b.score || 0) - (a.score || 0);
+      });
       setLeads(items);
     });
     return unsub;
@@ -104,8 +115,8 @@ export default function Dashboard() {
       const token = await user.getIdToken();
       const { job_id } = await startJob(token, queryText.trim(), []);
       setCurrentJobId(job_id);
-    } catch (e: any) {
-      setError(e.message || 'Failed to start. Is the backend running?');
+    } catch (e: unknown) {
+      setError(messageFromError(e, 'Failed to start. Is the backend running?'));
     } finally {
       setStarting(false);
     }
@@ -122,8 +133,8 @@ export default function Dashboard() {
     try {
       const token = await user.getIdToken();
       await downloadExcel(token, currentJobId);
-    } catch (e: any) {
-      setError(e.message || 'Failed to download.');
+    } catch (e: unknown) {
+      setError(messageFromError(e, 'Failed to download.'));
     }
   };
 
@@ -281,9 +292,12 @@ export default function Dashboard() {
                   <th>Priority</th>
                   <th>Business</th>
                   <th>City</th>
+                  <th>Area</th>
                   <th>Phone</th>
+                  <th>Type</th>
                   <th>Website</th>
                   <th>Instagram</th>
+                  <th>Confidence</th>
                   <th>Score</th>
                   <th>Maps</th>
                 </tr>
@@ -294,10 +308,12 @@ export default function Dashboard() {
                     <td><PriorityBadge p={lead.priority} /></td>
                     <td style={{ fontWeight: 500, color: 'var(--text)' }}>{lead.name}</td>
                     <td style={{ color: 'var(--muted)' }}>{lead.city}</td>
-                    <td>{lead.phone || <span style={{ color: 'var(--muted)' }}>—</span>}</td>
+                    <td style={{ color: 'var(--muted)' }}>{lead.area || '-'}</td>
+                    <td>{lead.phone || <span style={{ color: 'var(--muted)' }}>-</span>}</td>
+                    <td title={lead.evidence || ''}>{lead.lead_type || '-'}</td>
                     <td>
                       {lead.website
-                        ? <a href={lead.website} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>Link</a>
+                        ? <a href={lead.website} target="_blank" rel="noreferrer" title={lead.website} style={{ color: 'var(--accent)', textDecoration: 'none' }}>{lead.website_domain || 'Open'}</a>
                         : <span style={{ color: 'var(--hot)', fontSize: 12 }}>None</span>}
                     </td>
                     <td>
@@ -305,6 +321,7 @@ export default function Dashboard() {
                         ? <a href={`https://instagram.com/${lead.instagram_handle}`} target="_blank" rel="noreferrer" style={{ color: 'var(--accent)', textDecoration: 'none' }}>@{lead.instagram_handle}</a>
                         : <span style={{ color: 'var(--muted)' }}>—</span>}
                     </td>
+                    <td>{lead.confidence ? `${lead.confidence}%` : <span style={{ color: 'var(--muted)' }}>-</span>}</td>
                     <td style={{ fontWeight: 600 }}>{lead.score}</td>
                     <td>
                       {lead.google_maps_url
