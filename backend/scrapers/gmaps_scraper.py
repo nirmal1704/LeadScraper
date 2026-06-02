@@ -65,7 +65,8 @@ def _extract_areas_from_address(address: str, city: str) -> list[str]:
 
 
 class GMapsScraperV2:
-    def __init__(self, progress_cb=None, stop_flag=None):
+    def __init__(self, db=None, progress_cb=None, stop_flag=None):
+        self.db = db
         self.progress = progress_cb or (lambda msg: logger.info(msg))
         self.stop_flag = stop_flag or (lambda: False)
         self._pw = None
@@ -75,8 +76,14 @@ class GMapsScraperV2:
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox",
-                  "--disable-dev-shm-usage", "--disable-gpu"],
+            args=[
+                "--disable-blink-features=AutomationControlled", 
+                "--no-sandbox",
+                "--disable-dev-shm-usage", 
+                "--disable-gpu",
+                "--single-process",
+                "--js-flags=--max-old-space-size=128",
+            ],
         )
 
     async def stop(self):
@@ -100,6 +107,9 @@ class GMapsScraperV2:
             await stealth.apply_stealth_async(page)
         except Exception:
             pass
+            
+        # Block images, fonts, and stylesheets to save RAM
+        await page.route("**/*.{png,jpg,jpeg,css,woff,woff2,gif}", lambda route: route.abort())
         return page
 
     async def scrape_city(
@@ -114,7 +124,18 @@ class GMapsScraperV2:
         seen_hashes: set[str] = set()
         discovered: set[str] = set()
 
-        area_queue = list(_get_seed_areas(city))
+        # Load known areas from persistent memory
+        known_areas = set(_get_seed_areas(city))
+        if self.db:
+            try:
+                doc = self.db.collection("geography").document("india").collection("cities").document(city).get()
+                if doc.exists:
+                    saved_areas = doc.to_dict().get("areas", [])
+                    known_areas.update(saved_areas)
+            except Exception as e:
+                logger.error(f"Failed to fetch areas from DB: {e}")
+
+        area_queue = list(known_areas)
         searched: set[str] = set()
         areas_done = 0
 
@@ -133,10 +154,25 @@ class GMapsScraperV2:
             leads, new_areas = await self._scrape_area(query, city, area, seen_hashes)
             all_leads.extend(leads)
 
+            new_discovered = []
             for a in new_areas:
-                if a not in searched and a not in discovered:
+                if a not in searched and a not in discovered and a not in known_areas:
                     discovered.add(a)
                     area_queue.append(a)
+                    new_discovered.append(a)
+
+            # Persist newly discovered areas to the database
+            if new_discovered and self.db:
+                try:
+                    ref = self.db.collection("geography").document("india").collection("cities").document(city)
+                    from google.cloud import firestore
+                    ref.set({"areas": firestore.ArrayUnion(new_discovered)}, merge=True)
+                except Exception as e:
+                    logger.error(f"Failed to save discovered areas to DB: {e}")
+
+            # Force garbage collection between areas to free RAM
+            import gc
+            gc.collect()
 
             if len(all_leads) >= max_per_city:
                 break

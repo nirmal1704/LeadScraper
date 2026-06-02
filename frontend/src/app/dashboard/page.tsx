@@ -35,12 +35,6 @@ interface Lead {
   google_maps_url?: string;
 }
 
-const SOURCES = [
-  { id: 'gmaps', label: 'Google Maps' },
-  { id: 'justdial', label: 'JustDial' },
-  { id: 'urbanpro', label: 'UrbanPro' },
-  { id: 'zomato', label: 'Zomato' },
-];
 
 const PRIORITY_ORDER: Record<string, number> = { Hot: 0, Warm: 1, Medium: 2, Cold: 3, Skip: 4 };
 
@@ -49,7 +43,6 @@ export default function Dashboard() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
   const [queryText, setQueryText] = useState('');
-  const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [currentJobId, setCurrentJobId] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -109,7 +102,7 @@ export default function Dashboard() {
     prevLogLen.current = 0;
     try {
       const token = await user.getIdToken();
-      const { job_id } = await startJob(token, queryText.trim(), selectedSources);
+      const { job_id } = await startJob(token, queryText.trim(), []);
       setCurrentJobId(job_id);
     } catch (e: any) {
       setError(e.message || 'Failed to start. Is the backend running?');
@@ -134,11 +127,7 @@ export default function Dashboard() {
     }
   };
 
-  const toggleSource = (id: string) => {
-    setSelectedSources(prev =>
-      prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id]
-    );
-  };
+
 
   const isRunning = job?.status === 'running' || job?.status === 'queued';
   const isDone = job?.status === 'done';
@@ -179,30 +168,7 @@ export default function Dashboard() {
           style={{ resize: 'none', marginBottom: 20, lineHeight: 1.7 }}
         />
 
-        <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginBottom: 12, fontWeight: 500, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-          Sources <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>— leave blank to let AI decide</span>
-        </label>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 24 }}>
-          {SOURCES.map(s => (
-            <button
-              key={s.id}
-              onClick={() => toggleSource(s.id)}
-              disabled={isRunning}
-              style={{
-                padding: '7px 14px',
-                borderRadius: 6,
-                border: `1px solid ${selectedSources.includes(s.id) ? 'var(--accent)' : 'var(--border)'}`,
-                background: selectedSources.includes(s.id) ? '#1a2a4a' : 'var(--surface)',
-                color: selectedSources.includes(s.id) ? 'var(--accent)' : 'var(--muted)',
-                fontSize: 13,
-                cursor: 'pointer',
-                transition: 'all 0.15s',
-              }}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
+
 
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button

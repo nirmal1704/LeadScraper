@@ -7,17 +7,21 @@ Writes progress to Firestore → frontend reads in real time via onSnapshot.
 import asyncio
 import logging
 import threading
+import queue
 from datetime import datetime, timezone
 
 from firebase_config import get_db
 from llm.query_generator import generate_search_plan
 from scrapers.gmaps_scraper import GMapsScraperV2
+from scrapers.generic_scraper import GenericScraper
 from enrichment.website_checker import check_websites_batch
 from enrichment.scorer import score_leads_batch
 
 logger = logging.getLogger(__name__)
 
 _active_jobs: dict[str, bool] = {}   # job_id → stop requested
+_job_queue = queue.Queue()
+_worker_thread = None
 
 
 def request_stop(job_id: str):
@@ -65,48 +69,64 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         plan = generate_search_plan(user_query)
         cities = plan["cities"]
         queries = plan["search_queries"]
-        active_sources = sources if sources else plan["sources"]
+        active_sources = plan["sources"]
+        max_leads = plan.get("max_leads", 30)
+        max_areas = plan.get("max_areas", 5)
 
-        log(f"Plan ready — {len(cities)} cities, {len(queries)} search terms")
+        log(f"Plan ready — {len(cities)} cities, {len(queries)} terms, {len(active_sources)} sources")
+        log(f"Limits: {max_leads} leads/query, {max_areas} areas/query")
+        log(f"Sources: {', '.join(active_sources)}")
         log(f"Cities: {', '.join(cities)}")
         log(f"Queries: {', '.join(queries[:5])}{'...' if len(queries) > 5 else ''}")
 
         _set_status(db, user_id, job_id, "running", {"plan": plan})
 
-        # ── 2. Scrape GMaps (primary source) ──────────────────────────────────
-        if "gmaps" in active_sources:
-            scraper = GMapsScraperV2(progress_cb=log, stop_flag=stop)
-            await scraper.start()
-            try:
-                for city in cities:
-                    if stop():
-                        break
-                    log(f"--- {city} ---")
-                    for query in queries:
-                        if stop():
-                            break
-                        leads = await scraper.scrape_city(
-                            query=query, city=city, max_per_city=40, max_areas=5
-                        )
-                        all_leads.extend(leads)
-                        log(f"  Found {len(leads)} leads for '{query}' in {city}")
-
-                        # Save batch to Firestore as they come in
-                        _save_leads(db, user_id, job_id, leads)
-
-                    # Instagram enrichment per city (via Google search — reliable)
-                    log(f"Checking Instagram for {city} leads...")
-                    city_leads = [l for l in all_leads if l["city"] == city and not l.get("website")]
-                    for lead in city_leads[:10]:
-                        if stop():
-                            break
-                        has_ig, handle = await scraper.find_instagram(lead["name"], city)
-                        if has_ig:
-                            lead["has_instagram"] = True
-                            lead["instagram_handle"] = handle
-                            log(f"  Instagram found: {lead['name']} → @{handle}")
-            finally:
-                await scraper.stop()
+        # ── 2. Execute Scraping ───────────────────────────────────────────────
+        for source in active_sources:
+            if stop(): break
+            
+            if source == "gmaps":
+                log("--- Starting GMaps Scraper ---")
+                scraper = GMapsScraperV2(db=db, progress_cb=log, stop_flag=stop)
+                await scraper.start()
+                try:
+                    for city in cities:
+                        if stop(): break
+                        for query in queries:
+                            if stop(): break
+                            leads = await scraper.scrape_city(
+                                query=query, city=city, max_per_city=max_leads, max_areas=max_areas
+                            )
+                            all_leads.extend(leads)
+                            _save_leads(db, user_id, job_id, leads)
+                            
+                        # Quick IG enrichment
+                        city_leads = [l for l in all_leads if l["city"] == city and not l.get("website")]
+                        for lead in city_leads[:10]:
+                            if stop(): break
+                            has_ig, handle = await scraper.find_instagram(lead["name"], city)
+                            if has_ig:
+                                lead["has_instagram"] = True
+                                lead["instagram_handle"] = handle
+                finally:
+                    await scraper.stop()
+            
+            else:
+                log(f"--- Starting Generic Scraper for {source} ---")
+                scraper = GenericScraper(progress_cb=log, stop_flag=stop)
+                await scraper.start()
+                try:
+                    for city in cities:
+                        if stop(): break
+                        for query in queries:
+                            if stop(): break
+                            leads = await scraper.scrape_domain(
+                                domain=source, query=query, city=city, max_leads=max_leads
+                            )
+                            all_leads.extend(leads)
+                            _save_leads(db, user_id, job_id, leads)
+                finally:
+                    await scraper.stop()
 
         # ── 3. Website enrichment ─────────────────────────────────────────────
         log(f"Checking {len(all_leads)} websites...")
@@ -161,18 +181,43 @@ def _save_leads(db, user_id: str, job_id: str, leads: list[dict], overwrite: boo
         logger.error(f"Firestore batch write failed: {e}")
 
 
-def start_job(user_id: str, job_id: str, user_query: str, sources: list[str]):
-    """Launch the scraping job in a background thread."""
-    _active_jobs[job_id] = False
-
-    def _thread_target():
+def _global_worker():
+    """Runs continuously in the background, pulling jobs from the queue."""
+    while True:
+        job = _job_queue.get()
+        if job is None:
+            break
+        user_id, job_id, user_query, sources = job
+        
+        # Mark as running right before we actually start
+        db = get_db()
+        _set_status(db, user_id, job_id, "running")
+        _log(db, user_id, job_id, "Job pulled from queue. Starting execution...")
+        
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(_run_async(user_id, job_id, user_query, sources))
+        except Exception as e:
+            logger.error(f"Global worker error: {e}")
         finally:
             loop.close()
+            _job_queue.task_done()
 
-    t = threading.Thread(target=_thread_target, daemon=True)
-    t.start()
-    return t
+def start_job(user_id: str, job_id: str, user_query: str, sources: list[str]):
+    """Add job to the queue, start worker if not running."""
+    global _worker_thread
+    _active_jobs[job_id] = False
+    
+    # Let frontend know it's queued
+    db = get_db()
+    _set_status(db, user_id, job_id, "queued")
+    _log(db, user_id, job_id, "Job queued. Waiting for server resources...")
+    
+    _job_queue.put((user_id, job_id, user_query, sources))
+    
+    if _worker_thread is None or not _worker_thread.is_alive():
+        _worker_thread = threading.Thread(target=_global_worker, daemon=True)
+        _worker_thread.start()
+        
+    return _worker_thread

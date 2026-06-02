@@ -13,22 +13,22 @@ from langchain_core.output_parsers import JsonOutputParser
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a lead generation expert helping find small local Indian businesses without websites.
+SYSTEM_PROMPT = """You are a lead generation expert helping find local Indian businesses.
 
 Given a user's description of the leads they want, return a JSON object with:
 - "business_type": one of "classes", "cafes", "production", "services", "retail", "other"
 - "cities": list of Indian cities to search (max 6, pick the most relevant)
-- "search_queries": list of Google Maps search terms (max 12, be specific and varied)
-- "sources": list from ["gmaps", "justdial", "urbanpro", "zomato"] (pick what makes sense)
+- "search_queries": list of generic search terms (max 12, be specific and varied)
+- "sources": list of domains to search (e.g., ["gmaps", "instagram.com", "youtube.com", "filmfreeway.com"])
+- "max_leads": integer (determine from user's text, e.g. "quick check" = 10, "massive search" = 200, default 30)
+- "max_areas": integer (determine from user's text, how many neighborhoods to explore, default 5, max 30)
 - "filters": any specific filters like "small", "independent", "no chain" (list of strings)
 
 Rules:
-- Always include "gmaps" in sources — it is the most reliable
-- For food businesses add "zomato"  
-- For tutors/classes add "urbanpro" and "justdial"
-- Focus on SMALL LOCAL businesses, not chains or franchises
-- Make search queries specific: prefer "Kathak dance classes" over just "dance"
-- Include both English and common vernacular terms when relevant
+- Include "gmaps" for physical locations. Add generic websites (like "instagram.com", "zomato.com") if the user requests them or if they fit the business type well.
+- Focus on SMALL LOCAL businesses, not chains or franchises.
+- Make search queries specific: prefer "Kathak dance classes" over just "dance".
+- CRITICAL: DO NOT include city names in the search_queries (e.g., output "yoga classes" NOT "yoga classes in Mumbai"). The scraper will handle locations automatically.
 
 Respond ONLY with valid JSON. No explanation. No markdown.
 """
@@ -49,18 +49,6 @@ def _get_llm():
 
 
 def generate_search_plan(user_query: str) -> dict:
-    """
-    Turn a plain-English description into a structured scraping plan.
-
-    Returns:
-        {
-            "business_type": "classes",
-            "cities": ["Mumbai", "Pune"],
-            "search_queries": ["yoga classes", "dance studio", ...],
-            "sources": ["gmaps", "justdial"],
-            "filters": ["small", "independent"]
-        }
-    """
     try:
         prompt = ChatPromptTemplate.from_messages([
             ("system", SYSTEM_PROMPT),
@@ -76,34 +64,34 @@ def generate_search_plan(user_query: str) -> dict:
 
 
 def _validate_plan(plan: dict) -> dict:
-    """Ensure the plan has all required keys and reasonable values."""
     defaults = {
         "business_type": "other",
         "cities": ["Mumbai", "Delhi", "Bangalore"],
         "search_queries": ["local business"],
         "sources": ["gmaps"],
+        "max_leads": 30,
+        "max_areas": 5,
         "filters": [],
     }
     for k, v in defaults.items():
         if k not in plan or not plan[k]:
             plan[k] = v
 
-    # Cap sizes
     plan["cities"] = plan["cities"][:6]
     plan["search_queries"] = plan["search_queries"][:12]
-    plan["sources"] = [s for s in plan["sources"] if s in {"gmaps", "justdial", "urbanpro", "zomato"}]
-    if not plan["sources"]:
-        plan["sources"] = ["gmaps"]
+    if "gmaps" not in plan["sources"]:
+        plan["sources"].append("gmaps")
 
     return plan
 
 
 def _fallback_plan(user_query: str) -> dict:
-    """Minimal fallback if LLM fails."""
     return {
         "business_type": "other",
         "cities": ["Mumbai", "Bangalore", "Delhi"],
         "search_queries": [user_query.strip()[:60]],
         "sources": ["gmaps"],
+        "max_leads": 30,
+        "max_areas": 5,
         "filters": [],
     }
