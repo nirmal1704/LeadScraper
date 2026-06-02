@@ -138,7 +138,7 @@ export default function Dashboard() {
     let interval: NodeJS.Timeout;
     if (isRunning) {
       interval = setInterval(() => {
-        fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/health`)
+        fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'}/health`)
           .catch(() => {}); // ignore errors silently
       }, 120000); // 2 minutes
     }

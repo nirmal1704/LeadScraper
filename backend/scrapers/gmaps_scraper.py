@@ -50,7 +50,7 @@ def _get_seed_areas(city: str) -> list[str]:
 
 def _extract_areas_from_address(address: str, city: str) -> list[str]:
     """Discover new neighbourhood names from a scraped address."""
-    if not address:
+    if not address or city.lower() not in address.lower():
         return []
     cleaned = address.replace(city, "").strip(", ")
     parts = [p.strip() for p in cleaned.split(",")]
@@ -172,8 +172,13 @@ class GMapsScraperV2:
                 def _save_db():
                     try:
                         ref = self.db.collection("geography").document("india").collection("cities").document(city)
-                        from google.cloud import firestore
-                        ref.set({"areas": firestore.ArrayUnion(new_discovered)}, merge=True)
+                        doc = ref.get()
+                        existing = doc.to_dict().get("areas", []) if doc.exists else _get_seed_areas(city)
+                        for a in new_discovered:
+                            if a not in existing:
+                                existing.append(a)
+                        # Keep only the newest 15 areas so we remove older ones and get fresher results
+                        ref.set({"areas": existing[-15:]}, merge=True)
                     except Exception as e:
                         logger.error(f"Failed to save discovered areas to DB: {e}")
                 
@@ -192,8 +197,9 @@ class GMapsScraperV2:
     async def _scrape_area(
         self, query: str, city: str, area: str, seen: set, limit: int = 20
     ) -> tuple[list[dict], list[str]]:
-        url = GMAPS_URL.format(query=quote(query), location=quote(area))
-        self.progress(f"Searching '{query}' in {area}")
+        location_str = f"{area}, {city}"
+        url = GMAPS_URL.format(query=quote(query), location=quote(location_str))
+        self.progress(f"Searching '{query}' in {location_str}")
         leads = []
         new_areas = []
         page = await self._new_page()
