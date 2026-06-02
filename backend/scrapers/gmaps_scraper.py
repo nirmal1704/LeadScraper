@@ -81,8 +81,7 @@ class GMapsScraperV2:
                 "--no-sandbox",
                 "--disable-dev-shm-usage", 
                 "--disable-gpu",
-                "--single-process",
-                "--js-flags=--max-old-space-size=128",
+                "--js-flags=--max-old-space-size=64",
             ],
         )
 
@@ -108,8 +107,8 @@ class GMapsScraperV2:
         except Exception:
             pass
             
-        # Block images, fonts, and stylesheets to save RAM
-        await page.route("**/*.{png,jpg,jpeg,css,woff,woff2,gif}", lambda route: route.abort())
+        # Block images and fonts to save RAM, but KEEP CSS (blocking CSS freezes GMaps)
+        await page.route("**/*.{png,jpg,jpeg,woff,woff2,gif,webp}", lambda route: route.abort())
         return page
 
     async def scrape_city(

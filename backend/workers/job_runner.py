@@ -46,7 +46,12 @@ def _log(db, user_id: str, job_id: str, message: str):
 
 def firestore_array_union(value):
     from google.cloud import firestore
-    return firestore.ArrayUnion([f"[{datetime.now().strftime('%H:%M:%S')}] {value}"])
+    from datetime import datetime
+    import pytz
+    # Use Indian Standard Time (IST) for the logs shown on the frontend
+    ist = pytz.timezone('Asia/Kolkata')
+    current_time = datetime.now(ist).strftime('%H:%M:%S')
+    return firestore.ArrayUnion([f"[{current_time}] {value}"])
 
 
 def _set_status(db, user_id: str, job_id: str, status: str, extra: dict = None):

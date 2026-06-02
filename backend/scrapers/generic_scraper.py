@@ -35,8 +35,7 @@ class GenericScraper:
                 "--no-sandbox",
                 "--disable-dev-shm-usage", 
                 "--disable-gpu",
-                "--single-process",
-                "--js-flags=--max-old-space-size=128",
+                "--js-flags=--max-old-space-size=64",
             ],
         )
 
@@ -59,7 +58,7 @@ class GenericScraper:
         except Exception:
             pass
             
-        await page.route("**/*.{png,jpg,jpeg,css,woff,woff2,gif}", lambda route: route.abort())
+        await page.route("**/*.{png,jpg,jpeg,woff,woff2,gif,webp}", lambda route: route.abort())
         return page
 
     async def scrape_domain(self, domain: str, query: str, city: str, max_leads: int = 10) -> list[dict]:
