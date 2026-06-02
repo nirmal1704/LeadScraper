@@ -14,7 +14,6 @@ from langchain_core.output_parsers import JsonOutputParser
 
 logger = logging.getLogger(__name__)
 
-FREE_TIER_MAX_LEADS = 250
 FREE_TIER_MAX_AREAS = 8
 
 KNOWN_CITY_NAMES = {
@@ -95,9 +94,9 @@ def _validate_plan(plan: dict) -> dict:
     if not plan["search_queries"]:
         plan["search_queries"] = defaults["search_queries"]
     plan["sources"] = _clean_sources(plan["sources"])
-    plan["max_leads"] = _clamp_int(plan.get("max_leads"), 30, 5, FREE_TIER_MAX_LEADS)
+    plan["max_leads"] = _clamp_int(plan.get("max_leads"), 30, 5, 10000)
     plan["max_areas"] = _clamp_int(plan.get("max_areas"), 5, 1, FREE_TIER_MAX_AREAS)
-    plan["free_tier_cap_applied"] = plan["max_leads"] >= FREE_TIER_MAX_LEADS
+    plan["free_tier_cap_applied"] = False
 
     if "gmaps" not in plan["sources"]:
         plan["sources"].append("gmaps")

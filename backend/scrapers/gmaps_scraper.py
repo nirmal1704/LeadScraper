@@ -282,6 +282,12 @@ class GMapsScraperV2:
             panel_norm = _normalize_text(name)
             name_matches_card = bool(card_norm and (card_norm in panel_norm or panel_norm in card_norm))
 
+            # CRITICAL FIX: If the details panel name does not match the card name, it means the 
+            # details panel failed to load (or we misclicked). We MUST abort extraction immediately 
+            # so we don't accidentally extract the previous lead's website/phone number!
+            if card_norm and not name_matches_card:
+                return None, []
+
             phone = ""
             phone_el = await page.query_selector('[data-item-id*="phone"] .Io6YTe')
             if phone_el:

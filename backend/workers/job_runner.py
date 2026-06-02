@@ -118,6 +118,18 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                                 max_per_city=target_leads, 
                                 max_areas=max_areas
                             )
+                            
+                            # Stream website checks immediately for this batch
+                            website_results = await check_websites_batch(leads)
+                            for lead in leads:
+                                result = website_results.get(lead.get("id"))
+                                if result:
+                                    lead["website"] = result.url
+                                    lead["website_domain"] = _domain_from_url(result.url)
+                                    lead["website_status"] = result.status
+                                    lead["has_https"] = result.has_https
+                                    lead["has_mobile_meta"] = result.has_mobile_meta
+                            
                             score_leads_batch(leads)
                             all_leads.extend(leads)
                             _save_leads(db, user_id, job_id, leads)
@@ -153,6 +165,18 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             leads = await scraper.scrape_domain(
                                 domain=source, query=query, city=city, max_leads=target_leads
                             )
+                            
+                            # Stream website checks immediately for this batch
+                            website_results = await check_websites_batch(leads)
+                            for lead in leads:
+                                result = website_results.get(lead.get("id"))
+                                if result:
+                                    lead["website"] = result.url
+                                    lead["website_domain"] = _domain_from_url(result.url)
+                                    lead["website_status"] = result.status
+                                    lead["has_https"] = result.has_https
+                                    lead["has_mobile_meta"] = result.has_mobile_meta
+                            
                             score_leads_batch(leads)
                             all_leads.extend(leads)
                             _save_leads(db, user_id, job_id, leads)
@@ -165,29 +189,9 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
             _set_status(db, user_id, job_id, "stopped", {"leads_count": len(all_leads)})
             return
 
-        # ── 3. Website enrichment ─────────────────────────────────────────────
-        log(f"Checking {len(all_leads)} websites...")
-        website_results = await check_websites_batch(all_leads)
-        for lead in all_leads:
-            result = website_results.get(lead.get("id"))
-            if result:
-                lead["website"] = result.url
-                lead["website_domain"] = _domain_from_url(result.url)
-                lead["website_status"] = result.status
-                lead["has_https"] = result.has_https
-                lead["has_mobile_meta"] = result.has_mobile_meta
-
-        # ── 4. Score ──────────────────────────────────────────────────────────
-        log("Scoring leads...")
-        score_leads_batch(all_leads)
-
-        # Update all leads in Firestore with enrichment data
-        _save_leads(db, user_id, job_id, all_leads, overwrite=True)
-
-        # ── 5. Mark done ────────────────────────────────────────────────────
         hot_count = sum(1 for l in all_leads if l.get("priority") == "Hot")
         warm_count = sum(1 for l in all_leads if l.get("priority") == "Warm")
-        
+
         if stop():
             log(f"Stopped early. {len(all_leads)} leads found.")
             _set_status(db, user_id, job_id, "stopped", {
