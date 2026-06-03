@@ -98,6 +98,8 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         # ── 2. Execute Scraping ───────────────────────────────────────────────
         total_combos = max(1, len(active_sources) * len(cities) * len(queries))
         combos_done = 0
+        
+        seen_hashes = set()
 
         for source in active_sources:
             if stop(): break
@@ -110,14 +112,30 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     for city in cities:
                         if stop(): break
                         for query in queries:
+                            if source == "gmaps" and "online" in query.lower():
+                                log(f"Skipping GMaps for '{query}' because it is an online service.")
+                                continue
+
                             if stop() or len(all_leads) >= max_leads: break
                             
                             target_leads = _combo_budget(max_leads, len(all_leads), total_combos, combos_done)
-                            leads = await scraper.scrape_city(
+                            raw_leads = await scraper.scrape_city(
                                 query, city,
                                 max_per_city=target_leads, 
                                 max_areas=max_areas
                             )
+                            
+                            # Global Deduplication
+                            leads = []
+                            for lead in raw_leads:
+                                h = f"{lead['name'].lower()}{lead.get('phone','')}{city.lower()}"
+                                if h not in seen_hashes:
+                                    seen_hashes.add(h)
+                                    leads.append(lead)
+                            
+                            if not leads:
+                                combos_done += 1
+                                continue
                             
                             # Stream website checks immediately for this batch
                             website_results = await check_websites_batch(leads)
@@ -162,9 +180,21 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             
                             target_leads = _combo_budget(max_leads, len(all_leads), total_combos, combos_done)
                             
-                            leads = await scraper.scrape_domain(
+                            raw_leads = await scraper.scrape_domain(
                                 domain=source, query=query, city=city, max_leads=target_leads
                             )
+                            
+                            # Global Deduplication
+                            leads = []
+                            for lead in raw_leads:
+                                h = f"{lead['name'].lower()}{lead.get('phone','')}{city.lower()}"
+                                if h not in seen_hashes:
+                                    seen_hashes.add(h)
+                                    leads.append(lead)
+                                    
+                            if not leads:
+                                combos_done += 1
+                                continue
                             
                             # Stream website checks immediately for this batch
                             website_results = await check_websites_batch(leads)

@@ -286,7 +286,17 @@ class GMapsScraperV2:
                 
             card_norm = _normalize_text(card_name)
             panel_norm = _normalize_text(name)
-            name_matches_card = True
+            
+            # Relaxed DOM Matcher: 
+            # If the card is heavily truncated ("Swaramela International..."), exact matching fails.
+            # We now check if there's a strong overlap (e.g. at least 60% of the card characters are in the panel).
+            name_matches_card = False
+            if card_norm in panel_norm or panel_norm in card_norm:
+                name_matches_card = True
+            elif len(card_norm) > 5 and card_norm[:int(len(card_norm)*0.6)] in panel_norm:
+                name_matches_card = True
+            elif len(panel_norm) > 5 and panel_norm[:int(len(panel_norm)*0.6)] in card_norm:
+                name_matches_card = True
 
             # CRITICAL FIX: If the details panel name does not match the card name, it means the 
             # details panel failed to load (or we misclicked). We MUST abort extraction immediately 
@@ -321,9 +331,9 @@ class GMapsScraperV2:
                     review_count = int(m.group(1).replace(",", ""))
 
             website = ""
-            # ONLY use selectors that are exclusive to the details panel!
-            # If we use generic 'aria-label="Website"', it accidentally grabs the website button 
-            # from the first card in the sidebar if the current business doesn't have one!
+            social_links = []
+            
+            # First, check the 'authority' link (usually the primary website)
             for web_sel in [
                 'a[data-item-id="authority"]',
                 '[data-item-id="authority"] a'
@@ -331,10 +341,30 @@ class GMapsScraperV2:
                 web_el = await page.query_selector(web_sel)
                 if web_el:
                     href = await web_el.get_attribute("href") or ""
-                    # Exclude Google Maps internal links
                     if href and "google.com/maps" not in href and "google.com/search" not in href:
-                        website = href
+                        lower_href = href.lower()
+                        if any(d in lower_href for d in [
+                            'justdial.com', 'facebook.com', 'instagram.com', 
+                            'linkedin.com', 'linktr.ee', 'twitter.com', 'x.com',
+                            'wa.me', 'whatsapp.com', 'youtube.com'
+                        ]):
+                            social_links.append(href)
+                        else:
+                            website = href
                         break
+
+            # Second, check the "Profiles" section at the bottom of the details pane
+            # Google often links their Instagram and Facebook here
+            try:
+                profiles = await page.query_selector_all('a[data-item-id="authority"], a[href*="instagram.com"], a[href*="facebook.com"], a[href*="linkedin.com"], a[href*="youtube.com"], a[href*="justdial.com"]')
+                for p in profiles:
+                    href = await p.get_attribute("href")
+                    if href and "google.com" not in href and href not in social_links and href != website:
+                        # Ensure it's actually a social link
+                        if any(d in href.lower() for d in ['justdial', 'facebook', 'instagram', 'linkedin', 'linktr', 'twitter', 'x.com', 'wa.me', 'whatsapp', 'youtube']):
+                            social_links.append(href)
+            except Exception:
+                pass
 
             confidence = 55
             evidence = []
@@ -380,8 +410,9 @@ class GMapsScraperV2:
                 "website_status": None,
                 "has_https": None,
                 "has_mobile_meta": None,
-                "has_instagram": False,
-                "instagram_handle": None,
+                "social_links": ", ".join(social_links),
+                "has_instagram": any("instagram.com" in s for s in social_links),
+                "instagram_handle": next((s.split("instagram.com/")[1].strip("/") for s in social_links if "instagram.com/" in s), None),
                 "has_zomato": False,
                 "has_swiggy": False,
                 "score": 0,

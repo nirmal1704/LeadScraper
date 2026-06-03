@@ -27,6 +27,7 @@ COLUMNS = [
     ("Website",          "website",           30),
     ("Website Domain",   "website_domain",    22),
     ("Website Status",   "website_status",    14),
+    ("Other Links",      "social_links",      40),
     ("Instagram",        "instagram_handle",  20),
     ("Confidence",       "confidence",        12),
     ("Evidence",         "evidence",          45),

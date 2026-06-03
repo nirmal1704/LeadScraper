@@ -296,6 +296,7 @@ export default function Dashboard() {
                   <th>Phone</th>
                   <th>Type</th>
                   <th>Website</th>
+                  <th>Other Links</th>
                   <th>Instagram</th>
                   <th>Confidence</th>
                   <th>Score</th>
@@ -315,6 +316,11 @@ export default function Dashboard() {
                       {lead.website
                         ? <a href={lead.website} target="_blank" rel="noreferrer" title={lead.website} style={{ color: 'var(--accent)', textDecoration: 'none' }}>{lead.website_domain || 'Open'}</a>
                         : <span style={{ color: 'var(--hot)', fontSize: 12 }}>None</span>}
+                    </td>
+                    <td title={lead.social_links || ''}>
+                      {lead.social_links
+                        ? <span style={{ color: 'var(--muted)', fontSize: 11 }}>{lead.social_links.split(',').length} links</span>
+                        : <span style={{ color: 'var(--muted)' }}>—</span>}
                     </td>
                     <td>
                       {lead.instagram_handle
