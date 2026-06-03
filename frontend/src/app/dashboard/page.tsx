@@ -36,6 +36,7 @@ interface Lead {
   evidence?: string;
   address?: string;
   google_maps_url?: string;
+  social_links?: string;
 }
 
 
