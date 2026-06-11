@@ -12,4 +12,7 @@ services:
         sync: false
       - key: ALLOWED_ORIGINS
         value: https://your-app.vercel.app
+      - key: RENDER_FREE_TIER
+        value: "true"
     autoDeploy: true
+
