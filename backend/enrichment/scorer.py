@@ -158,12 +158,64 @@ def apply_filter(lead: dict, f: dict) -> bool:
     # Unknown op — don't block the lead
     return True
 
+# Fields that can't reliably be extracted from web search snippets.
+# For leads scraped from web/social sources, failing these fields
+# is NOT a reason to hard-drop — we mark them pending instead.
+_SNIPPET_UNRELIABLE_FIELDS = {"email", "phone"}
+
+# Source types that come from web/social scraping (not GMaps)
+_WEB_SOURCES = {
+    "instagram", "linkedin", "x", "twitter", "youtube",
+    "behance", "medium", "substack", "fiverr", "upwork",
+    "github", "producthunt", "crunchbase", "wellfound", "clutch",
+    "web", "Web", "ddg", "generic",
+}
+
+
+def _is_web_sourced(lead: dict) -> bool:
+    """Return True if the lead came from web/social scraping (not GMaps)."""
+    src = str(lead.get("source") or "").lower()
+    if src == "google maps":
+        return False
+    # Any non-GMaps source is considered web-sourced
+    return True
+
 
 def apply_filters(lead: dict, filters: list[dict]) -> bool:
-    """Return True if the lead matches ALL filter predicates (AND logic)."""
+    """
+    Return True if the lead passes ALL filter predicates.
+
+    Special handling for web/social leads:
+      - email / phone 'is_not_null' checks are SKIPPED if the field is empty
+        for web-sourced leads (emails are inside the profile, not in snippets).
+        Instead the lead is marked lead['email_pending'] = True so the user
+        knows to verify manually.
+      - All other filters are always hard.
+    """
     if not filters:
         return True
-    return all(apply_filter(lead, f) for f in filters)
+
+    web_sourced = _is_web_sourced(lead)
+
+    for f in filters:
+        field = f.get("field", "")
+        op    = f.get("op", "")
+
+        # Soft-skip: email/phone is_not_null on web-sourced leads
+        if (
+            web_sourced
+            and field in _SNIPPET_UNRELIABLE_FIELDS
+            and op == "is_not_null"
+            and not lead.get(field)  # field IS empty
+        ):
+            # Don't drop — mark as pending instead
+            lead[f"{field}_pending"] = True
+            continue  # treat as passing for now
+
+        if not apply_filter(lead, f):
+            return False
+
+    return True
 
 
 def apply_filters_batch(leads: list[dict], filters: list[dict]) -> list[dict]:

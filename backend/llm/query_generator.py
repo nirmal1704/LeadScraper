@@ -169,6 +169,12 @@ search_queries (max 12, for Google Maps — skip entirely if lead_intent=online)
 web_queries (max 8, for general web search):
   - Include city name and contact/social signal
   - e.g. "financial advisor Instagram Mumbai contact"
+  - If a "has_email" filter is requested: generate queries that specifically
+    surface profiles with visible emails:
+    * Include "gmail.com" OR "contact@" OR "email" in the query
+    * Example: "stock trader India gmail.com instagram"
+    * Example: "financial advisor Mumbai contact email site:linktr.ee"
+    * linktr.ee, linkinbio, bio.link pages often show emails publicly
 
 exclude_terms (3-5 terms): aggregator/directory signals to discard
   e.g. ["justdial", "directory", "list of", "top 10", "sulekha"]

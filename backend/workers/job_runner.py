@@ -191,13 +191,26 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         max_leads = plan.get("max_leads", 30)
         max_areas = plan.get("max_areas", 5)
 
+        # Social platforms use fewer queries to avoid combo explosion
+        _SOCIAL_SRC = {
+            "instagram.com", "linkedin.com", "x.com", "twitter.com",
+            "youtube.com", "behance.net", "medium.com", "substack.com",
+            "fiverr.com", "upwork.com", "github.com", "producthunt.com",
+        }
+        _social_q_limit = 3 if RENDER_FREE_TIER else 5
+
         # Total work units (for progress reporting)
         gmaps_combos_count = len(cities) * len(queries) if "gmaps" in active_sources else 0
         generic_sources = [s for s in active_sources if s != "gmaps"]
-        generic_combos_count = len(generic_sources) * len(cities) * len(queries)
+        generic_combos_count = sum(
+            len(cities) * (min(len(queries), _social_q_limit) if s in _SOCIAL_SRC else len(queries))
+            for s in generic_sources
+        )
         should_run_web_search = lead_intent in ("online", "hybrid") or search_strategy in ("web_first", "both")
-        web_combos_count = len(cities) * min(len(web_queries), 6) if should_run_web_search else 0
+        wq_limit = 3 if RENDER_FREE_TIER else 6
+        web_combos_count = len(cities) * min(len(web_queries), wq_limit) if should_run_web_search else 0
         total_combos = max(1, gmaps_combos_count + generic_combos_count + web_combos_count)
+
 
         log(f"Plan: {len(cities)} cities · {len(queries)} queries · intent={lead_intent} · strategy={search_strategy}")
         log(f"Target: {max_leads} leads · {max_areas} areas/city · {total_combos} total combos (parallel)")
@@ -376,6 +389,23 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         # ── 3. Generic Web Phase ──────────────────────────────────────────
         # On free tier: skip launching a second Chromium browser entirely.
         # GenericScraper.start() is NOT called — it will auto-use httpx fallback.
+        #
+        # Source routing:
+        #   - "directory" sources (clutch.co, crunchbase.com, etc.):
+        #       Use site:{domain} Google dork → scrape_domain()
+        #   - "social" sources (instagram, linkedin, x.com, behance, etc.):
+        #       site: dorks on social platforms are instantly rate-limited.
+        #       Instead use scrape_web() with platform-name appended to query.
+        #       e.g. "stock trader instagram Delhi contact" (no site: restriction)
+        SOCIAL_SOURCES = {
+            "instagram.com", "linkedin.com", "x.com", "twitter.com",
+            "youtube.com", "behance.net", "medium.com", "substack.com",
+            "fiverr.com", "upwork.com", "github.com", "producthunt.com",
+        }
+        DIRECTORY_SOURCES = {
+            "crunchbase.com", "wellfound.com", "clutch.co",
+        }
+
         run_generic = bool(generic_sources) or should_run_web_search
         if run_generic and not stop() and len(all_leads) < max_leads:
             log("--- Generic web phase (httpx/DDG mode on free tier) ---" if RENDER_FREE_TIER
@@ -385,6 +415,7 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                 await gen_scraper.start()  # only start browser on full tier
             try:
                 async def _generic_combo(source: str, query: str, city: str):
+                    """For directory-type sources: site:{domain} dork."""
                     if stop() or len(all_leads) >= max_leads:
                         return
                     async with generic_sem:
@@ -393,40 +424,89 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         remaining = max(3, max_leads - len(all_leads))
                         per_combo = max(3, max_leads // max(1, generic_combos_count))
                         target = min(remaining, per_combo + 2)
-
                         raw = await gen_scraper.scrape_domain(
                             domain=source, query=query, city=city, max_leads=target
                         )
                     await _process_leads(raw, intent=lead_intent)
                     await _tick(f"{source} '{query}' in {city}")
 
-                async def _web_combo(query: str, city: str):
+                async def _social_combo(platform: str, query: str, city: str):
+                    """
+                    For social platforms: use a general web search with the
+                    platform name embedded in the query (no site: restriction).
+                    e.g. "stock trader instagram Delhi profile contact"
+                    This avoids the site: rate-limit trap.
+                    """
                     if stop() or len(all_leads) >= max_leads:
                         return
                     async with generic_sem:
                         if stop() or len(all_leads) >= max_leads:
                             return
                         remaining = max(3, max_leads - len(all_leads))
+                        platform_keyword = platform.replace(".com", "").replace(".", "")
+                        # Build a natural query: "stock trader instagram Delhi profile"
+                        social_q = f"{query} {platform_keyword} {city} profile"
                         raw = await gen_scraper.scrape_web(
-                            query=query, city=city, max_leads=min(remaining, 8)
+                            query=social_q, city=city, max_leads=min(remaining, 8)
+                        )
+                        # Tag leads with the platform source
+                        for lead in raw:
+                            lead["source"] = platform_keyword.capitalize()
+                    await _process_leads(raw, intent=lead_intent)
+                    await _tick(f"{platform} '{query}' in {city}")
+
+                async def _web_combo(query: str, city: str):
+                    """General web search using the web_queries from the plan."""
+                    if stop() or len(all_leads) >= max_leads:
+                        return
+                    async with generic_sem:
+                        if stop() or len(all_leads) >= max_leads:
+                            return
+                        remaining = max(3, max_leads - len(all_leads))
+                        # web_queries already contain city names — pass city=" "
+                        # to avoid "Delhi Delhi contact" duplication in scrape_web
+                        raw = await gen_scraper.scrape_web(
+                            query=query, city="", max_leads=min(remaining, 8)
                         )
                     await _process_leads(raw, intent=lead_intent)
-                    await _tick(f"Web '{query}' in {city}")
+                    await _tick(f"Web '{query[:40]}' in {city}")
 
                 all_tasks: list = []
-                for src in generic_sources:
-                    all_tasks += [_generic_combo(src, q, c) for c in cities for q in queries]
-                if should_run_web_search:
-                    # Cap web combos on free tier to avoid too many concurrent httpx calls
-                    wq_limit = 3 if RENDER_FREE_TIER else 6
-                    all_tasks += [_web_combo(q, c) for c in cities for q in web_queries[:wq_limit]]
 
-                # Batch the generic tasks too
+                # Cap queries per source to avoid combo explosion
+                # Social platforms: top 3 queries only (each query+city is already specific)
+                # Directory sources: all queries
+                social_q_limit  = 3 if RENDER_FREE_TIER else 5
+                dir_q_limit     = len(queries)
+
+                for src in generic_sources:
+                    if src in SOCIAL_SOURCES:
+                        # Use natural web search (no site: dork)
+                        for q in queries[:social_q_limit]:
+                            for c in cities:
+                                all_tasks.append(_social_combo(src, q, c))
+                    else:
+                        # Directory: use site: dork
+                        for q in queries[:dir_q_limit]:
+                            for c in cities:
+                                all_tasks.append(_generic_combo(src, q, c))
+
+                if should_run_web_search:
+                    # web_queries already include city — use them directly
+                    wq_limit = 3 if RENDER_FREE_TIER else 6
+                    for q in web_queries[:wq_limit]:
+                        for c in cities:
+                            all_tasks.append(_web_combo(q, c))
+
+                # Batch the generic tasks
                 gen_batch = 3
                 for i in range(0, len(all_tasks), gen_batch):
                     if stop() or len(all_leads) >= max_leads:
                         break
                     await asyncio.gather(*all_tasks[i:i + gen_batch], return_exceptions=True)
+                    # Small delay between batches to be gentle on DDG rate limits
+                    if i + gen_batch < len(all_tasks):
+                        await asyncio.sleep(0.5)
 
             finally:
                 if GENERIC_USE_BROWSER:
