@@ -180,7 +180,7 @@ export default function Dashboard() {
         <div>
           <h1 style={{ fontSize: 20, fontWeight: 600 }}>LeadScraper</h1>
           <p style={{ color: 'var(--muted)', fontSize: 13 }}>
-            Find businesses without websites. Pitch them one.
+            Describe who you want to reach. We find them.
           </p>
         </div>
         <button
