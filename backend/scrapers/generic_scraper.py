@@ -39,6 +39,13 @@ _JUNK_DOMAINS = {
     "quora.com", "reddit.com", "wikipedia.org", "wikihow.com",
     "indiamart.com", "tradeindia.com", "exportersindia.com",
     "yellowpages.in", "asklaila.com", "google.com", "bing.com",
+    "clutch.co", "goodfirms.co", "upcity.com", "crunchbase.com", 
+    "fiverr.com", "upwork.com", "freelancer.com", "glassdoor.com", 
+    "trustpilot.com", "g2.com", "capterra.com", "expertise.com", 
+    "threebestrated.in", "medium.com", "pinterest.com",
+    "zoominfo.com", "rocketreach.co", "apollo.io", "lusha.com",
+    "zaubacorp.com", "tofler.in", "instancial.com", "ambitionbox.com",
+    "fundoodata.com", "vymaps.com", "nicelocal.in"
 }
 
 # Patterns for extracting contact info from text snippets
@@ -55,14 +62,61 @@ def _display_domain(url: str) -> str | None:
     return host or None
 
 
-def _is_junk_url(url: str) -> bool:
+# ── Social profile URL parser ──────────────────────────────────────────────────
+
+# Regex patterns to extract a meaningful identity from a social profile URL
+_SOCIAL_PROFILE_PATTERNS: list[tuple[str, re.Pattern]] = [
+    ("instagram.com",  re.compile(r"instagram\.com/([A-Za-z0-9_.]+)/?(?:\?|$)", re.I)),
+    ("x.com",          re.compile(r"(?:x|twitter)\.com/([A-Za-z0-9_]+)/?(?:\?|$)", re.I)),
+    ("twitter.com",    re.compile(r"(?:x|twitter)\.com/([A-Za-z0-9_]+)/?(?:\?|$)", re.I)),
+    ("linkedin.com",   re.compile(r"linkedin\.com/in/([A-Za-z0-9_\-]+)/?(?:\?|$)", re.I)),
+    ("youtube.com",    re.compile(r"youtube\.com/(?:c/|user/|@)([A-Za-z0-9_\-]+)/?(?:\?|$)", re.I)),
+    ("behance.net",    re.compile(r"behance\.net/([A-Za-z0-9_]+)/?(?:\?|$)", re.I)),
+    ("github.com",     re.compile(r"github\.com/([A-Za-z0-9_\-]+)/?(?:\?|$)", re.I)),
+]
+
+# Pages on social platforms that are NOT individual profiles
+_SOCIAL_NON_PROFILE_PATHS = {
+    "explore", "search", "reels", "stories", "tags", "directory",
+    "hashtag", "p", "reel", "tv", "accounts", "about", "login",
+    "signup", "help", "terms", "privacy", "press", "blog",
+}
+
+
+def _extract_social_handle(url: str) -> str | None:
+    """
+    If `url` points to an individual social profile, return a human-readable
+    version of the handle/username. Returns None for non-profile pages.
+    """
+    for _domain, pattern in _SOCIAL_PROFILE_PATTERNS:
+        m = pattern.search(url)
+        if m:
+            handle = m.group(1)
+            # Drop obviously non-profile path segments
+            if handle.lower() in _SOCIAL_NON_PROFILE_PATHS:
+                return None
+            # Convert handle to readable name: underscores/dots → spaces, title case
+            readable = re.sub(r"[_.\ ]+", " ", handle).strip().title()
+            return readable if len(readable) >= 3 else None
+    return None
+
+
+def _is_junk_url(url: str, target_domain: str | None = None) -> bool:
     domain = _display_domain(url) or ""
+    if target_domain and target_domain in domain:
+        return False
     return (
         any(j in domain for j in _JUNK_DOMAINS)
         or "login" in url.lower()
         or "signup" in url.lower()
         or "register" in url.lower()
     )
+
+
+_LISTICLE_RE = re.compile(r"(?i)\b(top\s+\d+|best\s+\d+|\d+\s+best|list\s+of|directory\s+of|firms\s+in|companies\s+in|agencies\s+in|traders\s+in|manufacturers\s+in|suppliers\s+in)\b")
+
+def _is_listicle_title(title: str) -> bool:
+    return bool(_LISTICLE_RE.search(title))
 
 
 def _extract_contact(text: str) -> tuple[str | None, str | None]:
@@ -74,12 +128,27 @@ def _extract_contact(text: str) -> tuple[str | None, str | None]:
     return email, phone
 
 
-def _build_lead(title: str, url: str, snippet: str, city: str, query: str, source_label: str) -> dict | None:
+def _build_lead(title: str, url: str, snippet: str, city: str, query: str, source_label: str, target_domain: str | None = None) -> dict | None:
     """Build a lead dict from a search result. Returns None if junk."""
-    if not url or _is_junk_url(url):
+    if not url or _is_junk_url(url, target_domain) or _is_listicle_title(title):
         return None
-    # Clean the title
-    name = re.split(r"[-|·•–]", title)[0].strip()
+
+    # ── Social profile: extract name from the URL handle ──────────────────
+    social_handle = _extract_social_handle(url)
+    if social_handle:
+        name = social_handle
+    else:
+        # ── Non-social page: clean the page title ─────────────────────────
+        # If the result URL is on a known social domain but NOT a profile page
+        # (e.g. instagram.com/explore/tags/trader) — skip it entirely.
+        domain = _display_domain(url) or ""
+        is_social_domain = any(pat[0] in domain for pat in _SOCIAL_PROFILE_PATTERNS)
+        if is_social_domain:
+            return None  # Non-profile social URL — not a lead
+
+        # Clean generic page titles
+        name = re.split(r"[-|·•–]", title)[0].strip()
+
     if not name or len(name) < 3:
         return None
 
@@ -216,7 +285,7 @@ class GenericScraper:
                     link = await link_el.get_attribute("href") or ""
                     snippet = await snippet_el.inner_text() if snippet_el else ""
                     if link and domain_clean in link:
-                        lead = _build_lead(title, link, snippet, city, query, f"Google/{domain_clean}")
+                        lead = _build_lead(title, link, snippet, city, query, f"Google/{domain_clean}", target_domain=domain_clean)
                         if lead:
                             leads.append(lead)
         except Exception as e:
@@ -271,10 +340,11 @@ class GenericScraper:
 
     # ── Strategy C: DuckDuckGo HTML (httpx, no browser needed) ────────────
 
-    async def _try_ddg_html(self, query_str: str, city: str, query: str, max_leads: int) -> list[dict]:
+    async def _try_ddg_html(self, query_str: str, city: str, query: str, max_leads: int, target_domain: str | None = None, platform_filter: str | None = None) -> list[dict]:
         """
         DuckDuckGo static HTML search — uses httpx, no Playwright needed.
         URL: html.duckduckgo.com/html/?q={query}
+        platform_filter: if set, only keep results whose URL is on this domain.
         """
         self.progress(f"DuckDuckGo fallback: {query_str}")
         leads = []
@@ -313,8 +383,11 @@ class GenericScraper:
                     snippet = snippet_el.get_text(strip=True) if snippet_el else ""
                     dom = _display_domain(href)
                     if href and dom and dom not in seen_domains:
+                        # If a platform filter is set, only keep on-platform URLs
+                        if platform_filter and platform_filter not in dom:
+                            continue
                         seen_domains.add(dom)
-                        lead = _build_lead(title, href, snippet, city, query, "DuckDuckGo")
+                        lead = _build_lead(title, href, snippet, city, query, "DuckDuckGo", target_domain=target_domain)
                         if lead:
                             leads.append(lead)
         except Exception as e:
@@ -323,7 +396,7 @@ class GenericScraper:
 
     # ── Strategy D: ddgs library (final fallback) ──────────────────────────
 
-    async def _try_ddgs(self, query_str: str, city: str, query: str, max_leads: int) -> list[dict]:
+    async def _try_ddgs(self, query_str: str, city: str, query: str, max_leads: int, target_domain: str | None = None, platform_filter: str | None = None) -> list[dict]:
         """duckduckgo-search library — handles throttling, works as last resort."""
         self.progress(f"ddgs library fallback: {query_str}")
         leads = []
@@ -343,8 +416,11 @@ class GenericScraper:
                 snippet = r.get("body", "")
                 dom = _display_domain(href)
                 if href and dom and dom not in seen_domains:
+                    # If a platform filter is set, only keep on-platform URLs
+                    if platform_filter and platform_filter not in dom:
+                        continue
                     seen_domains.add(dom)
-                    lead = _build_lead(title, href, snippet, city, query, "DuckDuckGo")
+                    lead = _build_lead(title, href, snippet, city, query, "DuckDuckGo", target_domain=target_domain)
                     if lead:
                         leads.append(lead)
         except Exception as e:
@@ -372,14 +448,56 @@ class GenericScraper:
 
         # Strategy C — DuckDuckGo HTML
         dork_q = f"site:{domain_clean} {query} {city}"
-        leads = await self._try_ddg_html(dork_q, city, query, max_leads)
+        leads = await self._try_ddg_html(dork_q, city, query, max_leads, target_domain=domain_clean, platform_filter=domain_clean)
         if leads:
             self.progress(f"  Found {len(leads)} leads from DDG HTML ({domain_clean})")
             return leads
 
         # Strategy D — ddgs library
-        leads = await self._try_ddgs(dork_q, city, query, max_leads)
+        leads = await self._try_ddgs(dork_q, city, query, max_leads, target_domain=domain_clean, platform_filter=domain_clean)
         self.progress(f"  Found {len(leads)} leads from ddgs ({domain_clean})")
+        return leads
+
+    # ── Public: social platform search (profile-only results) ──────────────
+
+    async def scrape_social(
+        self, platform: str, query: str, city: str, max_leads: int = 10
+    ) -> list[dict]:
+        """
+        Search for individual profiles on a specific social platform.
+        Uses site:{platform} dork to restrict results, then filters to
+        only profile URLs (using _extract_social_handle).
+        
+        Falls back: Google dork → DDG HTML+filter → ddgs+filter
+        """
+        platform_clean = (
+            platform.replace("https://", "").replace("http://", "")
+                    .replace("www.", "").strip("/")
+        )
+        self.progress(f"Social search: {query} on {platform_clean} in {city}")
+
+        # Try Google dork first (site:{platform} query city)
+        leads = await self._try_google_dork(platform_clean, query, city, max_leads)
+        if leads:
+            self.progress(f"  Found {len(leads)} social leads from Google dork ({platform_clean})")
+            return leads
+
+        # DDG with platform filter — only keep results on the platform domain
+        dork_q = f"site:{platform_clean} {query} {city}"
+        leads = await self._try_ddg_html(
+            dork_q, city, query, max_leads,
+            target_domain=platform_clean, platform_filter=platform_clean
+        )
+        if leads:
+            self.progress(f"  Found {len(leads)} social leads from DDG ({platform_clean})")
+            return leads
+
+        # ddgs fallback with platform filter
+        leads = await self._try_ddgs(
+            dork_q, city, query, max_leads,
+            target_domain=platform_clean, platform_filter=platform_clean
+        )
+        self.progress(f"  Found {len(leads)} social leads from ddgs ({platform_clean})")
         return leads
 
     # ── Public: general web search (for online/hybrid leads) ──────────────

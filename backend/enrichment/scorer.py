@@ -1,35 +1,25 @@
-"""
-enrichment/scorer.py
-────────────────────
-Filter evaluator + lead scorer.
-
-Architecture
-────────────
-1. apply_filter(lead, f)       — evaluates ONE predicate against a lead dict
-2. apply_filters(lead, filters) — returns True if lead matches ALL predicates (AND)
-3. apply_filters_batch(leads, filters) — filters a list, hard-drops non-matches
-4. score_lead(lead, filters)   — scores 0–100 and assigns priority tier
-
-Scoring philosophy
-──────────────────
-When NO filters are specified:
-  - Default behaviour: "no website = Hot" (classic website-sales use case)
-
-When filters ARE specified:
-  - Score is driven entirely by HOW WELL the lead matches the criteria,
-    not by any assumptions about what a good lead is.
-  - Leads that fail any filter are dropped BEFORE scoring (in apply_filters_batch).
-  - Among passing leads, score reflects data richness (email, phone, reviews…)
-    so the user can still sort/prioritise within the matching set.
-
-This makes the scorer completely independent of the "website" assumption.
-"""
-
+"""enrichment/scorer.py — Filter evaluator + lead scorer."""
 import re
 from urllib.parse import urlparse
 
 
-# ─── Social normaliser ────────────────────────────────────────────────────────
+def normalize_phone(phone: str | None) -> str | None:
+    """Normalize an Indian phone number to E.164-ish format (+91XXXXXXXXXX)."""
+    if not phone:
+        return None
+    digits = re.sub(r"[^\d]", "", phone)
+    # Strip leading country codes: 0091, +91, 91 (if 12 digits)
+    if digits.startswith("0091"):
+        digits = digits[4:]
+    elif digits.startswith("91") and len(digits) == 12:
+        digits = digits[2:]
+    elif digits.startswith("0") and len(digits) == 11:
+        digits = digits[1:]
+    # Valid Indian mobile: 10 digits starting with 6-9
+    if len(digits) == 10 and digits[0] in "6789":
+        return f"+91{digits}"
+    return phone  # return original if we can't confidently normalize
+
 
 def _domain(url: str) -> str | None:
     host = urlparse(url or "").netloc.lower().replace("www.", "")
@@ -37,18 +27,15 @@ def _domain(url: str) -> str | None:
 
 
 def normalize_socials(lead: dict):
-    """
-    If the website field is actually a social profile URL, move it out so
-    the lead is not incorrectly credited with a real website.
-    """
+    """Move social profile URLs out of website field."""
     website = lead.get("website")
     if not website:
         return
 
     lead["website_domain"] = _domain(website)
-    lower_site = website.lower()
+    lower = website.lower()
 
-    if "instagram.com" in lower_site:
+    if "instagram.com" in lower:
         lead["has_instagram"] = True
         m = re.search(r"instagram\.com/([^/?#]+)", website)
         if m:
@@ -56,97 +43,64 @@ def normalize_socials(lead: dict):
         lead["website"] = None
         lead["website_domain"] = None
         lead["lead_type"] = "Social profile only, no website"
-
-    elif "facebook.com" in lower_site:
+    elif "facebook.com" in lower:
         lead["website"] = None
         lead["website_domain"] = None
         lead["lead_type"] = "Social profile only, no website"
-
-    elif "youtube.com" in lower_site:
+    elif "youtube.com" in lower:
         lead["website"] = None
         lead["website_domain"] = None
         lead["lead_type"] = "Video channel only, no website"
-
-    elif "linkedin.com" in lower_site:
+    elif "linkedin.com" in lower:
         lead["website"] = None
         lead["website_domain"] = None
         lead["lead_type"] = "LinkedIn profile only, no website"
-
-    elif "x.com" in lower_site or "twitter.com" in lower_site:
+    elif "x.com" in lower or "twitter.com" in lower:
         lead["website"] = None
         lead["website_domain"] = None
         lead["lead_type"] = "Twitter/X profile only, no website"
 
 
-# ─── Filter predicate evaluator ───────────────────────────────────────────────
-
 def apply_filter(lead: dict, f: dict) -> bool:
-    """
-    Evaluate a single filter predicate against a lead.
-
-    Predicate schema:
-      {"field": str, "op": str, "value": any (optional), "label": str}
-
-    Supported ops per field type:
-      Nullable fields (website, email, phone):
-        is_null, is_not_null
-      Boolean fields (has_https, has_mobile_meta, has_instagram):
-        eq
-      String/enum fields (website_status, priority, source, category):
-        eq, neq, in, not_in, contains, not_contains
-      Numeric fields (rating, review_count, score):
-        gt, lt, gte, lte, eq
-    """
+    """Evaluate a single filter predicate against a lead."""
     field = f.get("field", "")
     op    = f.get("op", "")
     value = f.get("value")
+    raw   = lead.get(field)
 
-    raw = lead.get(field)
-
-    # ── Null/not-null ────────────────────────────────────────────────────────
     if op == "is_null":
         return raw is None or raw == "" or raw is False
     if op == "is_not_null":
         return raw is not None and raw != "" and raw is not False
 
-    # ── Boolean equality ─────────────────────────────────────────────────────
     if op == "eq":
         if isinstance(value, bool):
             return bool(raw) == value
         if isinstance(raw, (int, float)) and isinstance(value, (int, float)):
             return raw == value
         return str(raw).lower() == str(value).lower()
-
     if op == "neq":
         if isinstance(value, bool):
             return bool(raw) != value
         return str(raw).lower() != str(value).lower()
 
-    # ── Set membership ────────────────────────────────────────────────────────
     if op == "in":
-        if not isinstance(value, list):
-            value = [value]
+        value = value if isinstance(value, list) else [value]
         return str(raw).lower() in [str(v).lower() for v in value]
-
     if op == "not_in":
-        if not isinstance(value, list):
-            value = [value]
+        value = value if isinstance(value, list) else [value]
         return str(raw).lower() not in [str(v).lower() for v in value]
 
-    # ── Substring ─────────────────────────────────────────────────────────────
     if op == "contains":
         return str(value).lower() in str(raw or "").lower()
-
     if op == "not_contains":
         return str(value).lower() not in str(raw or "").lower()
 
-    # ── Numeric comparisons ───────────────────────────────────────────────────
     try:
         raw_n = float(raw) if raw is not None else None
         val_n = float(value) if value is not None else None
     except (TypeError, ValueError):
         return False
-
     if raw_n is None or val_n is None:
         return False
 
@@ -154,76 +108,35 @@ def apply_filter(lead: dict, f: dict) -> bool:
     if op == "lt":  return raw_n <  val_n
     if op == "gte": return raw_n >= val_n
     if op == "lte": return raw_n <= val_n
-
-    # Unknown op — don't block the lead
     return True
 
-# Fields that can't reliably be extracted from web search snippets.
-# For leads scraped from web/social sources, failing these fields
-# is NOT a reason to hard-drop — we mark them pending instead.
-_SNIPPET_UNRELIABLE_FIELDS = {"email", "phone"}
 
-# Source types that come from web/social scraping (not GMaps)
-_WEB_SOURCES = {
-    "instagram", "linkedin", "x", "twitter", "youtube",
-    "behance", "medium", "substack", "fiverr", "upwork",
-    "github", "producthunt", "crunchbase", "wellfound", "clutch",
-    "web", "Web", "ddg", "generic",
-}
+# email/phone presence can't be reliably inferred from web snippets
+_SNIPPET_UNRELIABLE = {"email", "phone"}
 
 
 def _is_web_sourced(lead: dict) -> bool:
-    """Return True if the lead came from web/social scraping (not GMaps)."""
-    src = str(lead.get("source") or "").lower()
-    if src == "google maps":
-        return False
-    # Any non-GMaps source is considered web-sourced
-    return True
+    return str(lead.get("source") or "").lower() != "google maps"
 
 
 def apply_filters(lead: dict, filters: list[dict]) -> bool:
-    """
-    Return True if the lead passes ALL filter predicates.
-
-    Special handling for web/social leads:
-      - email / phone 'is_not_null' checks are SKIPPED if the field is empty
-        for web-sourced leads (emails are inside the profile, not in snippets).
-        Instead the lead is marked lead['email_pending'] = True so the user
-        knows to verify manually.
-      - All other filters are always hard.
-    """
+    """Return True if lead passes ALL filter predicates."""
     if not filters:
         return True
-
     web_sourced = _is_web_sourced(lead)
-
     for f in filters:
-        field = f.get("field", "")
-        op    = f.get("op", "")
-
-        # Soft-skip: email/phone is_not_null on web-sourced leads
-        if (
-            web_sourced
-            and field in _SNIPPET_UNRELIABLE_FIELDS
-            and op == "is_not_null"
-            and not lead.get(field)  # field IS empty
-        ):
-            # Don't drop — mark as pending instead
+        field, op = f.get("field", ""), f.get("op", "")
+        # Soft-skip: email/phone is_not_null on web-sourced leads — mark pending instead of dropping
+        if web_sourced and field in _SNIPPET_UNRELIABLE and op == "is_not_null" and not lead.get(field):
             lead[f"{field}_pending"] = True
-            continue  # treat as passing for now
-
+            continue
         if not apply_filter(lead, f):
             return False
-
     return True
 
 
 def apply_filters_batch(leads: list[dict], filters: list[dict]) -> list[dict]:
-    """
-    Hard-filter: keep only leads that match all predicates.
-    Sets lead["filter_match"] = True on keepers.
-    Non-matching leads are dropped entirely (never written to Firestore).
-    """
+    """Hard-filter: keep only leads matching all predicates."""
     if not filters:
         return leads
     result = []
@@ -234,28 +147,9 @@ def apply_filters_batch(leads: list[dict], filters: list[dict]) -> list[dict]:
     return result
 
 
-# ─── Scorer ───────────────────────────────────────────────────────────────────
-
 def score_lead(lead: dict, filters: list[dict] | None = None) -> tuple[int, str]:
-    """
-    Score a lead 0–100 and assign a priority tier.
-
-    When filters are provided and the lead has already passed them,
-    scoring reflects DATA RICHNESS (how contactable/verifiable the lead is)
-    rather than the "no website = good" assumption.
-
-    When no filters are provided, the classic website-gap scoring applies
-    (backwards compatible with the original use case).
-
-    Priority tiers:
-      Hot    ≥ 85  — very high opportunity
-      Warm   ≥ 65  — good opportunity
-      Medium ≥ 45  — moderate
-      Cold   ≥ 25  — low but non-zero
-      Skip   <  25  — discard
-    """
+    """Score a lead 0–100 and assign a priority tier."""
     filters = filters or []
-    lead_intent    = lead.get("lead_intent", "physical")
     website        = lead.get("website")
     website_status = lead.get("website_status")
     has_https      = lead.get("has_https")
@@ -265,50 +159,39 @@ def score_lead(lead: dict, filters: list[dict] | None = None) -> tuple[int, str]
     has_phone      = bool(lead.get("phone"))
     review_count   = lead.get("review_count") or 0
     rating         = lead.get("rating") or 0
-    permanently_closed = lead.get("permanently_closed", False)
+    lead_intent    = lead.get("lead_intent", "physical")
+    follower_count = lead.get("follower_count") or 0
 
-    # ── Hard filter: permanently closed ──────────────────────────────────────
-    if permanently_closed:
+    if lead.get("permanently_closed"):
         lead["lead_type"] = "Permanently closed — skip"
         return 0, "Skip"
 
     if filters:
-        # ── Filter-driven mode: score = data richness ─────────────────────
-        # Base: 50 — the lead already passed the filter, so it's inherently valid
         score = 50
-
-        # Contact signals (how reachable is this lead?)
-        if has_email:   score += 20   # email = can cold-outreach directly
-        if has_phone:   score += 12   # phone = can call
-        if has_instagram: score += 6  # social presence
-
-        # Verification signals (how real/established is this business?)
-        if review_count >= 50:  score += 8
+        if has_email:            score += 20
+        if has_phone:            score += 12
+        if has_instagram:        score += 6
+        if review_count >= 50:   score += 8
         elif review_count >= 10: score += 4
-        if rating >= 4.0:       score += 4
-        elif rating >= 3.0:     score += 2
-
-        # Website state (useful context even in filter mode)
-        if website and website_status == "Up":
-            score += 3   # has a working site (relevant when filter is NOT about website)
-        if has_https:        score += 2
-        if has_mobile_meta:  score += 1
-
-        if lead.get("category"):
-            score += 2  # more verified data
-
-        # Cap and set lead_type
+        if rating >= 4.0:        score += 4
+        elif rating >= 3.0:      score += 2
+        if website and website_status == "Up": score += 3
+        if has_https:            score += 2
+        if has_mobile_meta:      score += 1
+        if lead.get("category"): score += 2
+        # Social presence signals (from profile_enricher)
+        if follower_count >= 100_000:  score += 10
+        elif follower_count >= 10_000: score += 6
+        elif follower_count >= 1_000:  score += 3
+        if lead.get("bio") and has_email: score += 4  # public email in bio = hot signal
         score = min(score, 100)
         if not lead.get("lead_type"):
             lead["lead_type"] = "Matched filter criteria"
-
     else:
-        # ── Default mode: website-gap scoring (original behaviour) ────────
         if not website:
             score = 90 if lead_intent == "physical" else 85
             lead["lead_type"] = lead.get("lead_type") or (
-                "No website found" if lead_intent == "physical"
-                else "Online business, no website"
+                "No website found" if lead_intent == "physical" else "Online business, no website"
             )
         elif website_status in ("Down", "Error", "Timeout", "Unknown"):
             score = 75
@@ -323,27 +206,20 @@ def score_lead(lead: dict, filters: list[dict] | None = None) -> tuple[int, str]
             score = 20
             lead["lead_type"] = "Working website"
 
-        # Bonus signals
-        if has_email:
-            score += 12 if lead_intent == "online" else 8
-        if not website:
-            if review_count >= 10: score += 5
-            if has_instagram:       score += 3
-        if lead.get("has_zomato") or lead.get("has_swiggy"):
-            if not website:         score += 4
+        if has_email:                          score += 12 if lead_intent == "online" else 8
+        if not website and review_count >= 10: score += 5
+        if not website and has_instagram:      score += 3
+        if (lead.get("has_zomato") or lead.get("has_swiggy")) and not website: score += 4
         if lead.get("category"):
             lead["confidence"] = min((lead.get("confidence") or 55) + 5, 100)
-
         score = min(score, 100)
 
-    # ── Priority tier ─────────────────────────────────────────────────────────
     if score >= 85:   priority = "Hot"
     elif score >= 65: priority = "Warm"
     elif score >= 45: priority = "Medium"
     elif score >= 25: priority = "Cold"
     else:             priority = "Skip"
 
-    # ── Evidence trail ────────────────────────────────────────────────────────
     lead["confidence"] = lead.get("confidence") or 40
     if website_status:
         parts = [p for p in [lead.get("evidence"), f"website: {website_status}"] if p]
@@ -353,10 +229,11 @@ def score_lead(lead: dict, filters: list[dict] | None = None) -> tuple[int, str]
 
 
 def score_leads_batch(leads: list[dict], filters: list[dict] | None = None) -> list[dict]:
-    """Score a list of lead dicts in-place. Returns the same list."""
     filters = filters or []
     for lead in leads:
         normalize_socials(lead)
+        if lead.get("phone"):
+            lead["phone"] = normalize_phone(lead["phone"]) or lead["phone"]
         score, priority = score_lead(lead, filters)
         lead["score"] = score
         lead["priority"] = priority

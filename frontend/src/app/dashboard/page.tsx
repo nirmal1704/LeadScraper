@@ -240,14 +240,23 @@ export default function Dashboard() {
               ref={logRef}
               style={{ height: 280, overflowY: 'auto', padding: '12px 20px' }}
             >
-              {(job.logs || []).map((line, i) => (
-                <div
-                  key={i}
-                  className={`log-line ${i >= (job.logs.length - 3) ? 'new' : ''}`}
-                >
-                  {line}
-                </div>
-              ))}
+              {(job.logs || []).map((line, i) => {
+                const isError = line.includes('[ERROR]');
+                const isCache = line.includes('[cached]');
+                return (
+                  <div
+                    key={i}
+                    className={`log-line ${i >= (job.logs.length - 3) ? 'new' : ''}`}
+                    style={
+                      isError ? { color: 'var(--hot)', fontWeight: 500 } :
+                      isCache ? { color: 'var(--warm)', opacity: 0.8 } :
+                      undefined
+                    }
+                  >
+                    {line}
+                  </div>
+                );
+              })}
               {!job.logs?.length && (
                 <p style={{ color: 'var(--muted)', fontSize: 12 }}>Waiting to start...</p>
               )}
