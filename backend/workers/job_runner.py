@@ -32,7 +32,7 @@ from llm.query_generator import generate_search_plan
 from scrapers.gmaps_scraper import GMapsScraperV2
 from scrapers.generic_scraper import GenericScraper
 from enrichment.website_checker import check_websites_batch
-from enrichment.scorer import score_leads_batch
+from enrichment.scorer import score_leads_batch, apply_filters_batch
 
 logger = logging.getLogger(__name__)
 
@@ -51,16 +51,26 @@ def _should_stop(job_id: str) -> bool:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-# Max simultaneous jobs per server (prevents OOM on Render free tier)
-MAX_CONCURRENT_JOBS = 2
+RENDER_FREE_TIER: bool = os.getenv("RENDER_FREE_TIER", "false").lower() == "true"
+
+# Free tier: 1 job max (one Chromium browser fits in 512MB, two do not)
+# Full tier: 2 concurrent jobs
+MAX_CONCURRENT_JOBS = 1 if RENDER_FREE_TIER else 2
 _job_semaphore = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
-# Concurrent Playwright pages per GMaps browser.
-# Free tier: 1 page (safest, ~250MB peak)
-# Full tier: 2 pages (faster, ~400MB peak)
-RENDER_FREE_TIER: bool = os.getenv("RENDER_FREE_TIER", "false").lower() == "true"
+# Concurrent Playwright pages for GMaps.
+# Free tier: 1 page, processed in small sequential batches
+# Full tier: 2 pages
 GMAPS_PAGE_CONCURRENCY: int = 1 if RENDER_FREE_TIER else 2
-GENERIC_CONCURRENCY: int = 1   # Always 1 — generic browser is lighter
+GENERIC_CONCURRENCY: int = 1
+
+# How many (query × city) combos to fan-out at once.
+# Prevents hundreds of coroutines all trying to open a page simultaneously.
+GMAPS_BATCH_SIZE: int = 3 if RENDER_FREE_TIER else 6
+
+# On free tier: skip launching a second Chromium for GenericScraper.
+# GenericScraper will fall back to httpx (DDG HTML / ddgs) automatically.
+GENERIC_USE_BROWSER: bool = not RENDER_FREE_TIER
 
 # Firestore write buffer — commit every N leads to cut round-trips
 LEAD_BUFFER_FLUSH_SIZE = 50
@@ -167,9 +177,17 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         web_queries = plan.get("web_queries") or queries[:6]
         lead_intent = plan.get("lead_intent", "physical")
         search_strategy = plan.get("search_strategy", "maps_first")
-        active_sources = list(sources) if sources else list(plan["sources"])
-        if "gmaps" not in active_sources:
+        active_filters = plan.get("filters") or []
+
+        # Respect the LLM's source decision — don't blindly force gmaps
+        if sources:  # caller-override (from API)
+            active_sources = list(sources)
+        else:
+            active_sources = list(plan["sources"])
+        # Only add gmaps if the plan calls for it (physical/hybrid)
+        if lead_intent in ("physical", "hybrid") and "gmaps" not in active_sources:
             active_sources.insert(0, "gmaps")
+
         max_leads = plan.get("max_leads", 30)
         max_areas = plan.get("max_areas", 5)
 
@@ -188,6 +206,9 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         log(f"Sources: {', '.join(active_sources)}")
         log(f"Cities: {', '.join(cities)}")
         log(f"Queries: {', '.join(queries[:5])}{'...' if len(queries) > 5 else ''}")
+        if active_filters:
+            filter_labels = " · ".join(f.get("label", f.get("field", "?")) for f in active_filters)
+            log(f"Filters (hard): {filter_labels}")
 
         if plan.get("free_tier_cap_applied"):
             log("Free-tier cap applied: focused batch mode.")
@@ -195,6 +216,7 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         random.shuffle(cities)
         random.shuffle(queries)
         _set_status(db, user_id, job_id, "running", {"plan": plan})
+
 
         # ── Helper: flush lead buffer to Firestore ────────────────────────
         async def _flush_buffer(force: bool = False):
@@ -205,7 +227,7 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     # Run synchronous Firestore write in a thread to not block event loop
                     await asyncio.to_thread(_save_leads, db, user_id, job_id, batch_snapshot)
 
-        # ── Helper: process a raw batch (dedup → website → score → buffer) ─
+        # ── Helper: process a raw batch (dedup → website → score → filter → buffer) ─
         async def _process_leads(raw_leads: list[dict], intent: str = lead_intent):
             if not raw_leads:
                 return
@@ -217,8 +239,10 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
             # Dedup — atomic check-and-add under asyncio lock
             new_leads: list[dict] = []
             async with dedup_lock:
+                # Use a higher ceiling for dedup so filters don't starve us
+                dedup_ceiling = max_leads * (3 if active_filters else 1)
                 for lead in raw_leads:
-                    if len(all_leads) + len(new_leads) >= max_leads:
+                    if len(all_leads) + len(new_leads) >= dedup_ceiling:
                         break
                     h = _make_dedup_key(lead)
                     if h not in seen_hashes:
@@ -239,13 +263,26 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     lead["has_https"] = result.has_https
                     lead["has_mobile_meta"] = result.has_mobile_meta
 
-            # Score
-            score_leads_batch(new_leads)
+            # Score (filter-aware: scoring adapts when filters present)
+            score_leads_batch(new_leads, filters=active_filters)
+
+            # Hard filter gate — drop non-matching leads before buffering
+            if active_filters:
+                before = len(new_leads)
+                new_leads = apply_filters_batch(new_leads, active_filters)
+                dropped = before - len(new_leads)
+                if dropped:
+                    logger.debug(f"Filter dropped {dropped}/{before} leads")
+
+            # Only count/buffer leads that passed the filter
+            matching = [l for l in new_leads if len(all_leads) < max_leads]
+            if not matching:
+                return
 
             # Add to shared state + buffer (under lock)
             async with buffer_lock:
-                all_leads.extend(new_leads)
-                lead_buffer.extend(new_leads)
+                all_leads.extend(matching)
+                lead_buffer.extend(matching)
 
             # Non-blocking flush
             await _flush_buffer()
@@ -259,9 +296,9 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
             pct = int(done / total_combos * 100)
             log(f"[{pct}%] {label} — {n} leads ({done}/{total_combos} combos done)")
 
-        # ── 2. GMaps Phase (true asyncio.gather fan-out) ──────────────────
+        # ── 2. GMaps Phase (batched fan-out to control RAM) ──────────────
         if "gmaps" in active_sources:
-            log("--- GMaps phase: all (query × city) combos running in parallel ---")
+            log(f"--- GMaps phase: batches of {GMAPS_BATCH_SIZE} combos ---")
             gmaps_scraper = GMapsScraperV2(db=db, progress_cb=log, stop_flag=stop)
             await gmaps_scraper.start()
             try:
@@ -269,14 +306,12 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     """One atomic (query, city) scraping unit."""
                     if stop() or len(all_leads) >= max_leads:
                         return
-                    # Skip GMaps for explicitly online service queries
                     if "online" in query.lower() and lead_intent == "online":
                         return
 
                     async with gmaps_sem:
                         if stop() or len(all_leads) >= max_leads:
                             return
-                        # Dynamic budget: remaining leads / remaining combos
                         remaining = max(5, max_leads - len(all_leads))
                         per_combo = max(5, max_leads // max(1, gmaps_combos_count))
                         target = min(remaining, per_combo + 3)
@@ -290,21 +325,29 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     await _process_leads(raw, intent=lead_intent)
                     await _tick(f"GMaps '{query}' in {city}")
 
+                # Process in small batches instead of one massive gather
+                # — prevents GMAPS_BATCH_SIZE × pages being open simultaneously
                 gmaps_tasks = [
                     _gmaps_combo(q, c)
                     for c in cities
                     for q in queries
                 ]
-                await asyncio.gather(*gmaps_tasks, return_exceptions=True)
+                for i in range(0, len(gmaps_tasks), GMAPS_BATCH_SIZE):
+                    if stop() or len(all_leads) >= max_leads:
+                        break
+                    batch = gmaps_tasks[i:i + GMAPS_BATCH_SIZE]
+                    await asyncio.gather(*batch, return_exceptions=True)
+                    import gc; gc.collect()  # free page memory between batches
 
-                # ── IG enrichment (parallel, post-GMaps) ──────────────────
+                # ── IG enrichment (post-GMaps, sequential on free tier) ────
                 no_web = [
                     l for l in all_leads
                     if not l.get("website") and l.get("source") == "Google Maps"
                 ]
+                ig_limit = 5 if RENDER_FREE_TIER else 10
                 if no_web and not stop():
-                    log(f"Instagram lookup for {min(len(no_web), 10)} leads (parallel)...")
-                    ig_sem = asyncio.Semaphore(3)
+                    log(f"Instagram lookup for {min(len(no_web), ig_limit)} leads...")
+                    ig_sem = asyncio.Semaphore(1 if RENDER_FREE_TIER else 3)
 
                     async def _fetch_ig(lead: dict):
                         if stop():
@@ -320,21 +363,26 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             lead["confidence"] = max(lead.get("confidence") or 0, 75)
 
                     await asyncio.gather(
-                        *[_fetch_ig(l) for l in no_web[:10]],
+                        *[_fetch_ig(l) for l in no_web[:ig_limit]],
                         return_exceptions=True,
                     )
-                    score_leads_batch(no_web[:10])
-                    await asyncio.to_thread(_save_leads, db, user_id, job_id, no_web[:10], True)
+                    score_leads_batch(no_web[:ig_limit])
+                    await asyncio.to_thread(_save_leads, db, user_id, job_id, no_web[:ig_limit], True)
 
             finally:
                 await gmaps_scraper.stop()
+                import gc; gc.collect()  # release Chromium RAM before generic phase
 
         # ── 3. Generic Web Phase ──────────────────────────────────────────
+        # On free tier: skip launching a second Chromium browser entirely.
+        # GenericScraper.start() is NOT called — it will auto-use httpx fallback.
         run_generic = bool(generic_sources) or should_run_web_search
         if run_generic and not stop() and len(all_leads) < max_leads:
-            log("--- Generic web phase: parallel ---")
+            log("--- Generic web phase (httpx/DDG mode on free tier) ---" if RENDER_FREE_TIER
+                else "--- Generic web phase: parallel ---")
             gen_scraper = GenericScraper(progress_cb=log, stop_flag=stop)
-            await gen_scraper.start()
+            if GENERIC_USE_BROWSER:
+                await gen_scraper.start()  # only start browser on full tier
             try:
                 async def _generic_combo(source: str, query: str, city: str):
                     if stop() or len(all_leads) >= max_leads:
@@ -360,7 +408,7 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             return
                         remaining = max(3, max_leads - len(all_leads))
                         raw = await gen_scraper.scrape_web(
-                            query=query, city=city, max_leads=min(remaining, 10)
+                            query=query, city=city, max_leads=min(remaining, 8)
                         )
                     await _process_leads(raw, intent=lead_intent)
                     await _tick(f"Web '{query}' in {city}")
@@ -369,12 +417,21 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                 for src in generic_sources:
                     all_tasks += [_generic_combo(src, q, c) for c in cities for q in queries]
                 if should_run_web_search:
-                    all_tasks += [_web_combo(q, c) for c in cities for q in web_queries[:6]]
+                    # Cap web combos on free tier to avoid too many concurrent httpx calls
+                    wq_limit = 3 if RENDER_FREE_TIER else 6
+                    all_tasks += [_web_combo(q, c) for c in cities for q in web_queries[:wq_limit]]
 
-                await asyncio.gather(*all_tasks, return_exceptions=True)
+                # Batch the generic tasks too
+                gen_batch = 3
+                for i in range(0, len(all_tasks), gen_batch):
+                    if stop() or len(all_leads) >= max_leads:
+                        break
+                    await asyncio.gather(*all_tasks[i:i + gen_batch], return_exceptions=True)
 
             finally:
-                await gen_scraper.stop()
+                if GENERIC_USE_BROWSER:
+                    await gen_scraper.stop()
+                import gc; gc.collect()
 
         # ── 4. Final flush & summary ──────────────────────────────────────
         await _flush_buffer(force=True)

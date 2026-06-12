@@ -18,12 +18,15 @@ PRIORITY_COLORS = {
 
 COLUMNS = [
     ("Business Name",    "name",              30),
-    ("Category",         "query",             20),
+    ("Category",         "category",          20),
     ("City",             "city",              14),
     ("Area",             "area",              18),
     ("Phone",            "phone",             16),
+    ("Email",            "email",             28),
     ("Address",          "address",           35),
     ("Lead Type",        "lead_type",         28),
+    ("Lead Intent",      "lead_intent",       14),
+    ("Open Now",         "open_now",          10),
     ("Website",          "website",           30),
     ("Website Domain",   "website_domain",    22),
     ("Website Status",   "website_status",    14),

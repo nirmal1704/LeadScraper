@@ -16,7 +16,14 @@ interface Job {
   hot_count?: number;
   warm_count?: number;
   download_url?: string;
-  plan?: { cities: string[]; search_queries: string[]; sources: string[] };
+  plan?: {
+    cities: string[];
+    search_queries: string[];
+    sources: string[];
+    lead_intent?: string;
+    search_strategy?: string;
+    segment?: string;
+  };
 }
 
 interface Lead {
@@ -24,6 +31,7 @@ interface Lead {
   name: string;
   city: string;
   phone?: string;
+  email?: string;
   website?: string;
   website_domain?: string;
   instagram_handle?: string;
@@ -32,11 +40,14 @@ interface Lead {
   query: string;
   area?: string;
   lead_type?: string;
+  lead_intent?: string;
   confidence?: number;
   evidence?: string;
   address?: string;
   google_maps_url?: string;
   social_links?: string;
+  category?: string;
+  open_now?: boolean | null;
 }
 
 
@@ -269,6 +280,12 @@ export default function Dashboard() {
             {job.plan && (
               <p style={{ color: 'var(--muted)', fontSize: 12, marginTop: 16, lineHeight: 1.6 }}>
                 Searching {job.plan.cities?.join(', ')}
+                {job.plan.lead_intent && (
+                  <> &middot; <span style={{ color: 'var(--accent)' }}>{job.plan.lead_intent}</span> leads</>
+                )}
+                {job.plan.search_strategy && (
+                  <> &middot; {job.plan.search_strategy.replace('_', ' ')} strategy</>
+                )}
               </p>
             )}
           </div>
@@ -292,9 +309,11 @@ export default function Dashboard() {
                 <tr>
                   <th>Priority</th>
                   <th>Business</th>
+                  <th>Category</th>
                   <th>City</th>
                   <th>Area</th>
                   <th>Phone</th>
+                  <th>Email</th>
                   <th>Type</th>
                   <th>Website</th>
                   <th>Other Links</th>
@@ -309,9 +328,15 @@ export default function Dashboard() {
                   <tr key={lead.id}>
                     <td><PriorityBadge p={lead.priority} /></td>
                     <td style={{ fontWeight: 500, color: 'var(--text)' }}>{lead.name}</td>
+                    <td style={{ color: 'var(--muted)', fontSize: 12 }}>{lead.category || '-'}</td>
                     <td style={{ color: 'var(--muted)' }}>{lead.city}</td>
                     <td style={{ color: 'var(--muted)' }}>{lead.area || '-'}</td>
                     <td>{lead.phone || <span style={{ color: 'var(--muted)' }}>-</span>}</td>
+                    <td>
+                      {lead.email
+                        ? <a href={`mailto:${lead.email}`} style={{ color: 'var(--accent)', textDecoration: 'none', fontSize: 12 }}>{lead.email}</a>
+                        : <span style={{ color: 'var(--muted)' }}>-</span>}
+                    </td>
                     <td title={lead.evidence || ''}>{lead.lead_type || '-'}</td>
                     <td>
                       {lead.website

@@ -56,8 +56,21 @@ def start(body: StartJobRequest, authorization: str = Header(default="")):
 
 @router.delete("/{job_id}")
 def stop(job_id: str, authorization: str = Header(default="")):
-    _get_uid(authorization)
+    uid = _get_uid(authorization)
     request_stop(job_id)
+    
+    # Safely force the status to 'stopped' in the database immediately.
+    # This guarantees the "Download Excel" button will unlock on the frontend
+    # even if the server restarts or the worker thread dies unexpectedly.
+    try:
+        db = get_db()
+        db.collection("users").document(uid).collection("jobs").document(job_id).update({
+            "status": "stopped",
+            "updated_at": datetime.now(timezone.utc)
+        })
+    except Exception:
+        pass
+        
     return {"stopped": True}
 
 

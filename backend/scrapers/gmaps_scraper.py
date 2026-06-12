@@ -117,7 +117,21 @@ class GMapsScraperV2:
                 "--disable-webgl",
                 "--disable-3d-apis",
                 "--disable-software-rasterizer",
-                "--js-flags=--max-old-space-size=48",
+                # Reduce JS heap to absolute minimum
+                "--js-flags=--max-old-space-size=32",
+                # Single renderer process — biggest RAM saver in containers
+                "--renderer-process-limit=1",
+                # Kill background networking and prefetch
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-extensions",
+                "--disable-plugins",
+                "--disable-sync",
+                "--no-first-run",
+                "--mute-audio",
+                # Disable features that leak RAM
+                "--disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process",
+                "--disable-site-isolation-trials",
             ],
         )
 

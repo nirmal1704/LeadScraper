@@ -9,12 +9,13 @@ Temperature 0.2 rationale:
   - 0.2 → JSON structure integrity guaranteed, natural synonym/phrasing variation
   - 0.5+ → risks malformed JSON and hallucinated city names
 
-New plan fields vs original:
-  - segment       : free-form description of target (replaces rigid business_type enum)
-  - lead_intent   : "physical" | "online" | "hybrid" (drives which scrapers activate)
-  - search_strategy: "maps_first" | "web_first" | "both" (drives orchestration)
-  - web_queries   : separate web-search query list (different angle from Maps queries)
-  - exclude_terms : bad-result signals (directories, listicles, review sites)
+Plan fields:
+  - segment        : free-form description of target
+  - lead_intent    : "physical" | "online" | "hybrid"
+  - search_strategy: "maps_first" | "web_first" | "both"
+  - web_queries    : separate web-search query list
+  - filters        : open-ended predicate list (field + op + value)
+  - exclude_terms  : bad-result signals
 """
 
 import os
@@ -34,75 +35,155 @@ SYSTEM_PROMPT = """You are a world-class lead generation strategist and expert i
 
 Given a user's description of the leads they want, return a valid JSON object with EXACTLY these fields:
 
-{
+{{
   "segment": "plain-English description of the target business segment",
   "lead_intent": "physical" | "online" | "hybrid",
   "search_strategy": "maps_first" | "web_first" | "both",
   "cities": ["City1", "City2", ...],
   "search_queries": ["query1", "query2", ...],
   "web_queries": ["web query1", "web query2", ...],
-  "sources": ["gmaps", "instagram.com", ...],
+  "sources": ["gmaps", "linkedin.com", ...],
   "max_leads": 30,
   "max_areas": 5,
   "filters": [],
   "exclude_terms": ["directory", "top 10", ...]
-}
+}}
 
-=== FIELD RULES ===
+=== INTENT & STRATEGY ===
 
 lead_intent:
   - "physical" → businesses with a physical location (restaurants, studios, shops, clinics)
-  - "online"   → remote/digital-only (SaaS, freelancers, content creators, e-commerce)
-  - "hybrid"   → both physical and online presence (agencies, consultants, service businesses)
+  - "online"   → remote/digital-only (SaaS, freelancers, creators, social media personalities)
+  - "hybrid"   → both physical office AND online presence (agencies, consultants, brokers, firms)
 
 search_strategy:
-  - "maps_first" → for physical leads (use Google Maps as primary)
-  - "web_first"  → for online leads (use web search and LinkedIn as primary)
-  - "both"       → for hybrid leads (run both Maps and web search)
+  - "maps_first" → physical leads (Google Maps primary)
+  - "web_first"  → online leads (web search + social platforms primary)
+  - "both"       → hybrid leads (run Maps AND web)
+
+=== SOCIAL MEDIA / ONLINE DISCOVERY ===
+If the user asks for people or businesses "on social media", "on Instagram", "on LinkedIn",
+"online traders", "content creators", or similar digital-presence targets:
+  - Set lead_intent = "online", search_strategy = "web_first"
+  - Set sources to social platforms only (NO gmaps)
+  - search_queries must be SHORT professional role/niche terms (2-4 words), NEVER the user's sentence
+    Example for "traders and financial advisors on social media":
+      ["stock trader", "financial advisor", "SEBI registered advisor",
+       "mutual fund distributor", "wealth manager", "equity analyst",
+       "forex trader", "commodity trader", "investment advisor"]
+  - web_queries must add city + platform signal:
+      ["financial advisor Instagram India", "stock trader LinkedIn profile India",
+       "SEBI advisor contact India", "mutual fund advisor portfolio India"]
+
+=== FIRMS & HYBRID TARGETS ===
+If the user mentions firms, companies, agencies, brokerages, studios, or similar organizations:
+  - Set lead_intent = "hybrid", search_strategy = "both"
+  - Always include "gmaps" in sources (firms have offices)
+  - Generate BOTH firm-level queries ("wealth management firm", "SEBI registered broker")
+    AND individual-level queries ("financial advisor", "equity analyst")
+  - Add relevant professional network sources (linkedin.com for finance/corporate firms)
+
+=== SOURCES CATALOG ===
+Pick the most relevant sources for the target segment. Never add more than 4 total.
+
+Physical / local businesses:
+  - "gmaps"           → Google Maps (always for physical/hybrid)
+
+Professional / B2B:
+  - "linkedin.com"    → corporates, consultants, agencies, finance professionals, B2B SaaS
+  - "crunchbase.com"  → startups, funded companies, tech firms
+  - "wellfound.com"   → tech startups (AngelList)
+  - "clutch.co"       → agencies, IT firms, consultants
+
+Social / creative:
+  - "instagram.com"   → fashion, food, fitness, wellness, traders, lifestyle creators
+  - "x.com"           → traders, investors, finance influencers, tech founders, journalists
+  - "youtube.com"     → educators, coaches, creators, review channels
+  - "behance.net"     → graphic designers, UI/UX, illustrators, photographers
+  - "medium.com"      → bloggers, writers, thought leaders, indie analysts
+  - "substack.com"    → newsletter writers, independent journalists, finance analysts
+
+Freelance / marketplace:
+  - "fiverr.com"      → freelance designers, writers, video editors, voice artists
+  - "upwork.com"      → freelance developers, marketers, accountants
+
+Discovery / community:
+  - "producthunt.com" → SaaS products, indie makers, app founders
+  - "github.com"      → developers, open-source maintainers
+
+=== FILTERS — FULLY OPEN-ENDED PREDICATES ===
+If the user states ANY qualification or selection criteria (e.g. "who need a website",
+"with fewer than 100 reviews", "no HTTPS", "have email", "rating below 3",
+"no portfolio", "hot leads only", "who are restaurants"), convert it into structured
+filter predicates. The filter system is completely open — you are NOT limited to
+predefined categories.
+
+Each filter is a JSON object:
+  - "field"  : the lead data field to check
+  - "op"     : the comparison operator
+  - "value"  : (optional) the comparison value
+  - "label"  : short human-readable description
+
+Available fields and operators:
+
+  website          → ops: "is_null", "is_not_null"
+  website_status   → ops: "in", "not_in"        values: list from ["Up","Down","Error","Timeout","Unknown"]
+  has_https        → ops: "eq"                   values: true | false
+  has_mobile_meta  → ops: "eq"                   values: true | false
+  email            → ops: "is_null", "is_not_null"
+  phone            → ops: "is_null", "is_not_null"
+  has_instagram    → ops: "eq"                   values: true | false
+  rating           → ops: "gt", "lt", "gte", "lte", "eq"    values: float 0–5
+  review_count     → ops: "gt", "lt", "gte", "lte", "eq"    values: integer
+  score            → ops: "gt", "lt", "gte", "lte"           values: integer 0–100
+  priority         → ops: "eq", "in"             values: "Hot"|"Warm"|"Medium"|"Cold"
+  category         → ops: "contains", "not_contains"         values: keyword string
+  source           → ops: "eq", "neq"            values: "Google Maps"|"Instagram"|"LinkedIn" etc
+
+Examples:
+  "who need a website or portfolio"    → [{{"field":"website","op":"is_null","label":"No website"}}]
+  "with broken website"                → [{{"field":"website_status","op":"in","value":["Down","Error","Timeout"],"label":"Broken website"}}]
+  "no HTTPS"                           → [{{"field":"has_https","op":"eq","value":false,"label":"No HTTPS"}}]
+  "have a contact email"               → [{{"field":"email","op":"is_not_null","label":"Has email"}}]
+  "rating below 4"                     → [{{"field":"rating","op":"lt","value":4.0,"label":"Rating below 4"}}]
+  "fewer than 50 reviews"              → [{{"field":"review_count","op":"lt","value":50,"label":"Fewer than 50 reviews"}}]
+  "hot leads only"                     → [{{"field":"priority","op":"in","value":["Hot"],"label":"Hot leads only"}}]
+  "no phone number"                    → [{{"field":"phone","op":"is_null","label":"No phone"}}]
+  "score above 70"                     → [{{"field":"score","op":"gt","value":70,"label":"Score above 70"}}]
+  "restaurant or cafe"                 → [{{"field":"category","op":"contains","value":"restaurant","label":"Is restaurant or cafe"}}]
+
+Multiple criteria: combine as an array — ALL must match (AND logic).
+If no criteria mentioned: set filters = [].
+
+=== QUERY RULES ===
 
 cities (max 6 Indian cities):
   - Pick the most business-dense relevant cities for this segment
   - If user mentions specific cities, use only those
 
-search_queries (max 12, for Google Maps):
-  - Generate DIVERSE query families across multiple angles:
-    * Category: "yoga studio", "wellness center"
-    * Role/profession: "yoga instructor", "certified yoga teacher"
-    * Niche/specialty: "hot yoga", "aerial yoga", "prenatal yoga"
-    * Offering: "yoga classes", "yoga teacher training"
-  - Make them sound like what a CUSTOMER types into Google Maps to find this business
-  - SHORT (2-4 words each), specific, action-oriented
+search_queries (max 12, for Google Maps — skip entirely if lead_intent=online):
+  - SHORT (2-4 words), specific professional/category terms
+  - NEVER echo the user's sentence, NEVER include city names
+  - Diverse: cover category, role, niche, service type
 
 web_queries (max 8, for general web search):
-  - Different angle from Maps queries — include contact/email signals
-  - Example: "yoga studio Pune contact email", "yoga instructor India portfolio website"
-  - Include city name here (unlike search_queries)
+  - Include city name and contact/social signal
+  - e.g. "financial advisor Instagram Mumbai contact"
 
-sources:
-  - Always include "gmaps" for physical/hybrid leads
-  - Add "linkedin.com" for B2B, tech, SaaS, corporate
-  - Add "instagram.com" for creative, food, fashion, wellness
-  - Add "youtube.com" for educators, creators, influencers
-  - Never add more than 3 sources total
+exclude_terms (3-5 terms): aggregator/directory signals to discard
+  e.g. ["justdial", "directory", "list of", "top 10", "sulekha"]
 
-exclude_terms (3-5 terms):
-  - Words that indicate a bad result (aggregator, directory, review site)
-  - Example: ["directory", "list of", "top 10", "best yoga", "justdial"]
+max_leads: integer
+  - "few"/"quick" → 10–15  |  default → 30  |  "thorough" → 80–100  |  "massive" → 150–200
 
-max_leads: integer derived from user intent
-  - "quick" / "few" → 10-15
-  - default → 30
-  - "thorough" / "comprehensive" → 80-100
-  - "massive" / "all" → 150-200
+max_areas: neighbourhoods per city (default 5, max 8)
 
-max_areas: how many neighbourhoods to search per city (default 5, never exceed 8)
-
-=== CRITICAL DONT'S ===
-1. NEVER include city/country names in search_queries (put them in cities)
-2. NEVER use "near me", "best X in", "top X", "how to", or informational phrasing in search_queries
-3. NEVER generate duplicate or near-duplicate queries
-4. For online-only (SaaS, freelancers): set lead_intent="online", search_strategy="web_first"
-5. For physical shops/restaurants: set lead_intent="physical", search_strategy="maps_first"
+=== CRITICAL RULES ===
+1. NEVER include city/country names in search_queries
+2. NEVER use "near me", "best X", "top X", "how to" in search_queries
+3. NEVER echo the user's raw sentence as a query — decompose into short terms
+4. online/web_first plans: OMIT gmaps from sources
+5. physical/hybrid plans: ALWAYS include gmaps
 6. Respond ONLY with valid JSON. No explanation. No markdown fences.
 """
 
@@ -136,7 +217,8 @@ def generate_search_plan(user_query: str) -> dict:
         logger.info(f"LLM plan generated: intent={result.get('lead_intent')}, "
                     f"strategy={result.get('search_strategy')}, "
                     f"cities={result.get('cities')}, "
-                    f"queries={len(result.get('search_queries', []))}")
+                    f"queries={len(result.get('search_queries', []))}, "
+                    f"filters={len(result.get('filters', []))}")
         return _validate_plan(result)
     except Exception as e:
         logger.error(f"LLM query generation failed: {e}")
@@ -175,7 +257,12 @@ def _validate_plan(plan: dict) -> dict:
 
     # Clean and cap lists
     plan["cities"] = _clean_cities(plan.get("cities") or [])[:6] or defaults["cities"]
-    plan["search_queries"] = _clean_queries(plan.get("search_queries") or [], plan["cities"])[:12]
+
+    raw_queries = _clean_queries(plan.get("search_queries") or [], plan["cities"])
+    # Sanity-check: drop any query that looks like the user's raw sentence
+    # (longer than 60 chars = almost certainly echoed verbatim from the prompt)
+    raw_queries = [q for q in raw_queries if len(q) <= 60]
+    plan["search_queries"] = raw_queries[:12]
     if not plan["search_queries"]:
         plan["search_queries"] = defaults["search_queries"]
 
@@ -184,14 +271,27 @@ def _validate_plan(plan: dict) -> dict:
     plan["max_leads"] = _clamp_int(plan.get("max_leads"), 30, 5, 10000)
     plan["max_areas"] = _clamp_int(plan.get("max_areas"), 5, 1, FREE_TIER_MAX_AREAS)
     plan["exclude_terms"] = [str(x).lower().strip() for x in (plan.get("exclude_terms") or [])][:8]
+
+    # Validate filters — each must be a dict with at least "field" and "op"
+    plan["filters"] = [
+        f for f in (plan.get("filters") or [])
+        if isinstance(f, dict) and "field" in f and "op" in f
+    ]
     plan["free_tier_cap_applied"] = False
 
-    # GMaps should be present for physical/hybrid, can be absent for pure online
-    if plan["lead_intent"] != "online" and "gmaps" not in plan["sources"]:
+    # Source rules:
+    #   physical / hybrid  → always need gmaps
+    #   online / web_first → gmaps is WRONG here; remove it
+    intent = plan["lead_intent"]
+    strategy = plan["search_strategy"]
+    if intent in ("physical", "hybrid") and "gmaps" not in plan["sources"]:
         plan["sources"].insert(0, "gmaps")
-    # For online-only with web_first, GMaps is optional but default to include it
-    elif "gmaps" not in plan["sources"]:
-        plan["sources"].append("gmaps")
+    elif intent == "online" or strategy == "web_first":
+        # Explicitly strip gmaps from online/web_first plans
+        plan["sources"] = [s for s in plan["sources"] if s != "gmaps"]
+        # Ensure at least one usable source remains
+        if not plan["sources"]:
+            plan["sources"] = ["linkedin.com", "instagram.com"]
 
     return plan
 
@@ -287,6 +387,21 @@ def _clean_web_queries(queries: list) -> list[str]:
     return cleaned
 
 
+# Allowed source domains (everything the GenericScraper can meaningfully dork)
+_ALLOWED_SOURCES = {
+    "gmaps",
+    # Professional
+    "linkedin.com", "crunchbase.com", "wellfound.com", "clutch.co",
+    # Social / creative
+    "instagram.com", "x.com", "twitter.com", "youtube.com",
+    "behance.net", "medium.com", "substack.com",
+    # Freelance / marketplace
+    "fiverr.com", "upwork.com",
+    # Discovery
+    "producthunt.com", "github.com",
+}
+
+
 def _clean_sources(sources: list) -> list[str]:
     if not isinstance(sources, list):
         return ["gmaps"]
@@ -295,9 +410,13 @@ def _clean_sources(sources: list) -> list[str]:
         s = (str(source).lower()
              .replace("https://", "").replace("http://", "")
              .replace("www.", "").strip("/"))
+        # Normalize aliases
         if s in {"google maps", "maps", "google"}:
             s = "gmaps"
-        if s and s not in seen:
+        if s == "twitter.com":
+            s = "x.com"  # normalize to current domain
+        # Only allow sources we know how to scrape
+        if s in _ALLOWED_SOURCES and s not in seen:
             seen.add(s)
             allowed.append(s)
     return allowed or ["gmaps"]
