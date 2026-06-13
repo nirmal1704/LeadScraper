@@ -36,7 +36,7 @@ _job_semaphore = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
 GMAPS_PAGE_CONCURRENCY: int = 1 if RENDER_FREE_TIER else 2
 GENERIC_CONCURRENCY: int = 1
-GMAPS_BATCH_SIZE: int = 3 if RENDER_FREE_TIER else 6
+GMAPS_BATCH_SIZE: int = 1 if RENDER_FREE_TIER else 6
 GENERIC_USE_BROWSER: bool = not RENDER_FREE_TIER
 LEAD_BUFFER_FLUSH_SIZE = 50
 ZERO_YIELD_ABORT = 5      # consecutive zero-yield combos before aborting a source
@@ -462,10 +462,9 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     async with gmaps_sem:
                         if stop() or len(all_leads) >= max_leads:
                             return
-                        remaining = max(5, max_leads - len(all_leads))
-                        per_combo = max(5, max_leads // max(1, gmaps_combos_count))
+                        remaining = max_leads - len(all_leads)
                         try:
-                            raw = await gmaps.scrape_city(query, city, max_per_city=min(remaining, per_combo + 3), max_areas=max_areas)
+                            raw = await gmaps.scrape_city(query, city, max_per_city=remaining, max_areas=max_areas)
                             if raw:
                                 await asyncio.to_thread(_set_cached_leads, db, ckey, raw)
                         except Exception as e:
@@ -523,10 +522,15 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     async with generic_sem:
                         if stop() or len(all_leads) >= max_leads:
                             return
-                        remaining = max(3, max_leads - len(all_leads))
-                        per_combo = max(3, max_leads // max(1, generic_combos_count))
+                        remaining = max_leads - len(all_leads)
                         try:
-                            raw = await gen.scrape_domain(domain=source, query=query, city=city, max_leads=min(remaining, per_combo + 2))
+                            raw = await asyncio.wait_for(
+                                gen.scrape_domain(domain=source, query=query, city=city, max_leads=remaining),
+                                timeout=120
+                            )
+                        except asyncio.TimeoutError:
+                            _log_error(db, user_id, job_id, source, query, city, "Timeout reached (120s)")
+                            raw = []
                         except Exception as e:
                             _log_error(db, user_id, job_id, source, query, city, str(e))
                             raw = []
@@ -554,14 +558,20 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     async with generic_sem:
                         if stop() or len(all_leads) >= max_leads:
                             return
-                        remaining = max(3, max_leads - len(all_leads))
+                        remaining = max_leads - len(all_leads)
                         platform_keyword = platform.replace(".com", "").replace(".", "")
                         try:
-                            raw = await gen.scrape_social(platform=platform, query=query, city=city, max_leads=min(remaining, 8))
+                            raw = await asyncio.wait_for(
+                                gen.scrape_social(platform=platform, query=query, city=city, max_leads=remaining),
+                                timeout=120
+                            )
                             for lead in raw:
                                 lead["source"] = platform_keyword.capitalize()
                             if raw:
                                 await asyncio.to_thread(_set_cached_leads, db, ckey, raw)
+                        except asyncio.TimeoutError:
+                            _log_error(db, user_id, job_id, platform, query, city, "Timeout reached (120s)")
+                            raw = []
                         except Exception as e:
                             _log_error(db, user_id, job_id, platform, query, city, str(e))
                             raw = []
@@ -577,9 +587,15 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     async with generic_sem:
                         if stop() or len(all_leads) >= max_leads:
                             return
-                        remaining = max(3, max_leads - len(all_leads))
+                        remaining = max_leads - len(all_leads)
                         try:
-                            raw = await gen.scrape_web(query=query, city="", max_leads=min(remaining, 8))
+                            raw = await asyncio.wait_for(
+                                gen.scrape_web(query=query, city="", max_leads=remaining),
+                                timeout=120
+                            )
+                        except asyncio.TimeoutError:
+                            _log_error(db, user_id, job_id, "web", query, city, "Timeout reached (120s)")
+                            raw = []
                         except Exception as e:
                             _log_error(db, user_id, job_id, "web", query, city, str(e))
                             raw = []
@@ -604,11 +620,12 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         for c in cities:
                             all_tasks.append(_web_combo(q, c))
 
-                for i in range(0, len(all_tasks), 3):
+                generic_batch_size = 1 if RENDER_FREE_TIER else 3
+                for i in range(0, len(all_tasks), generic_batch_size):
                     if stop() or len(all_leads) >= max_leads:
                         break
-                    await asyncio.gather(*all_tasks[i:i + 3], return_exceptions=True)
-                    if i + 3 < len(all_tasks):
+                    await asyncio.gather(*all_tasks[i:i + generic_batch_size], return_exceptions=True)
+                    if i + generic_batch_size < len(all_tasks):
                         await asyncio.sleep(0.5)
             finally:
                 if GENERIC_USE_BROWSER:

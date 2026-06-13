@@ -96,7 +96,7 @@ class GMapsScraperV2:
             await self._browser.close()
 
     async def _new_page(self):
-        page = await self._browser.new_page()
+        page = await asyncio.wait_for(self._browser.new_page(), timeout=30.0)
         
         async def _abort(route):
             await route.abort()
@@ -176,9 +176,10 @@ class GMapsScraperV2:
         url = GMAPS_URL.format(query=quote(query), location=quote(location_str))
         self.progress(f"Searching '{query}' in {location_str}")
         leads, new_areas = [], []
-        page = await self._new_page()
+        page = None
 
         try:
+            page = await self._new_page()
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             except Exception:
@@ -219,8 +220,12 @@ class GMapsScraperV2:
         except Exception as e:
             self.progress(f"  GMaps error in {area}: {e}")
         finally:
-            await page.context.close()
-
+            if page:
+                if page.context == self._browser:
+                    await page.context.clear_cookies()
+                    await page.close()
+                else:
+                    await page.context.close()
         return leads, list(set(new_areas))
 
     async def _extract(self, page, listing, city: str, area: str, query: str):
@@ -398,8 +403,9 @@ class GMapsScraperV2:
     async def find_instagram(self, name: str, city: str) -> tuple[bool, Optional[str]]:
         """Find Instagram handle via Google search."""
         url = GOOGLE_SEARCH_URL.format(query=quote(f"{name} {city} instagram"))
-        page = await self._new_page()
+        page = None
         try:
+            page = await self._new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(random.uniform(1.5, 2.5))
             content = await page.content()
@@ -409,4 +415,9 @@ class GMapsScraperV2:
         except Exception:
             return False, None
         finally:
-            await page.context.close()
+            if page:
+                if page.context == self._browser:
+                    await page.context.clear_cookies()
+                    await page.close()
+                else:
+                    await page.context.close()

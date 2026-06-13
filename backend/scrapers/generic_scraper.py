@@ -228,7 +228,8 @@ class GenericScraper:
             await self._browser.close()
 
     async def _new_page(self):
-        page = await self._browser.new_page()
+        # Add a timeout so that Playwright deadlocks do not hang the thread indefinitely
+        page = await asyncio.wait_for(self._browser.new_page(), timeout=30.0)
         return page
 
     # ── Strategy A: Google Dork (site:{domain}) ────────────────────────────
@@ -242,9 +243,10 @@ class GenericScraper:
         domain_clean = domain.replace("https://", "").replace("http://", "").replace("www.", "").strip("/")
         dork = f'site:{domain_clean} "{query}" {city}'
         self.progress(f"Google dork: {dork}")
-        page = await self._new_page()
         leads = []
+        page = None
         try:
+            page = await self._new_page()
             url = GOOGLE_SEARCH_URL.format(query=quote(dork))
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(random.uniform(1.5, 2.5))
@@ -273,7 +275,12 @@ class GenericScraper:
         except Exception as e:
             logger.debug(f"Google dork failed: {e}")
         finally:
-            await page.context.close()
+            if page:
+                if page.context == self._browser:
+                    await page.context.clear_cookies()
+                    await page.close()
+                else:
+                    await page.context.close()
         return leads
 
     # ── Strategy B: Direct Google Web Search ──────────────────────────────
@@ -284,9 +291,10 @@ class GenericScraper:
             return []
         search_q = f'"{query}" "{city}" contact -site:justdial.com -site:sulekha.com -site:quora.com'
         self.progress(f"Google web search: {query} in {city}")
-        page = await self._new_page()
         leads = []
+        page = None
         try:
+            page = await self._new_page()
             url = GOOGLE_SEARCH_URL.format(query=quote(search_q))
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(random.uniform(1.5, 2.5))
@@ -317,7 +325,12 @@ class GenericScraper:
         except Exception as e:
             logger.debug(f"Google web search failed: {e}")
         finally:
-            await page.context.close()
+            if page:
+                if page.context == self._browser:
+                    await page.context.clear_cookies()
+                    await page.close()
+                else:
+                    await page.context.close()
         return leads
 
     # ── Strategy C: DuckDuckGo HTML (httpx, no browser needed) ────────────
