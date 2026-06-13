@@ -86,7 +86,6 @@ class GMapsScraperV2:
             geoip=True if proxy_config else False,
             humanize=0.5,
             locale="en-IN",
-            block_images=True,
         )
         self._browser = await self._camoufox_manager.__aenter__()
 
@@ -102,8 +101,7 @@ class GMapsScraperV2:
         async def _abort(route):
             await route.abort()
             
-        # Abort unnecessary resources to save RAM and speed up
-        await page.route("**/*.{png,jpg,jpeg,woff,woff2,gif,webp,svg}", _abort)
+        # Abort heavy maps data to save RAM
         await page.route("**/maps/vt/**", _abort)
         await page.route("**/maps/viewer/**", _abort)
         return page
