@@ -1,4 +1,4 @@
-# LeadScraper
+# [LeadScraper](https://lead-scraper-dun.vercel.app/)
 
 You describe your ideal lead. LeadScraper figures out where to look, searches across Google Maps, LinkedIn, Instagram, X, and a dozen other sources, scores every result, and hands you a clean Excel file ready to work with.
 
@@ -60,7 +60,7 @@ When you submit a query, the backend does the following in order:
 An LLM (Llama 3.3 70B on Groq) reads your query and produces a structured scraping plan: which cities to search, what queries to run, which sources to use, and what filters to apply. It decides whether your target is a physical business (uses Google Maps), an online presence (uses LinkedIn, Instagram, X, etc.), or both.
 
 **2. Scraping**
-For physical leads, a headless Chromium browser navigates Google Maps neighbourhood by neighbourhood and extracts business listings. For online/social leads, the system runs web searches with platform-specific queries rather than using blocked `site:` restrictions. All source types fall back gracefully from Google search to DuckDuckGo if rate-limited.
+For physical leads, a stealth headless Firefox browser (Camoufox) navigates Google Maps neighbourhood by neighbourhood and extracts business listings. For online/social leads, the system runs web searches with platform-specific queries rather than using blocked `site:` restrictions. All source types fall back gracefully from Google search to DuckDuckGo if rate-limited.
 
 **3. Enrichment**
 Each lead's website (if any) is checked: is it reachable? Does it have HTTPS? Is it mobile-friendly? Social profile URLs are normalised — an Instagram URL in the website field gets moved to the social handle field, not counted as a website.
@@ -80,7 +80,7 @@ When the job finishes, an Excel file is generated with all leads sorted by score
 | Frontend | Next.js, deployed on Vercel |
 | Backend | FastAPI (Python), deployed on Render |
 | AI / LLM | Groq (Llama 3.3 70B) orchestrated with LangChain |
-| Browser automation | Playwright (Chromium headless) |
+| Browser automation | Playwright with [Camoufox](https://github.com/daijro/camoufox) by @daijro (Stealth Firefox) |
 | Web search fallback | DuckDuckGo HTML + ddgs library |
 | Authentication | Firebase Auth (Google sign-in) |
 | Database | Firestore (real-time lead sync) |
@@ -107,4 +107,4 @@ You'll need a `.env` file in `/backend` with `GROQ_API_KEY` and `FIREBASE_SERVIC
 
 ---
 
-v0.4.4
+v0.5.1

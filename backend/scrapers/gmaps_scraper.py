@@ -7,8 +7,8 @@ import uuid
 from urllib.parse import quote, urlparse
 from typing import Optional
 
-from playwright.async_api import async_playwright
-from playwright_stealth import Stealth
+import os
+from camoufox.async_api import AsyncCamoufox
 
 from llm.area_bootstrapper import bootstrap_city_areas, STATIC_CITY_AREAS
 
@@ -77,53 +77,32 @@ class GMapsScraperV2:
         self._browser = None
 
     async def start(self):
-        self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(
+        proxy_url = os.getenv("PROXY_URL")
+        proxy_config = {"server": proxy_url} if proxy_url else None
+        
+        self._camoufox_manager = AsyncCamoufox(
             headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-webgl",
-                "--disable-3d-apis",
-                "--disable-software-rasterizer",
-                "--js-flags=--max-old-space-size=32",
-                "--renderer-process-limit=1",
-                "--disable-background-networking",
-                "--disable-default-apps",
-                "--disable-extensions",
-                "--disable-plugins",
-                "--disable-sync",
-                "--no-first-run",
-                "--mute-audio",
-                "--disable-features=TranslateUI,BlinkGenPropertyTrees,IsolateOrigins,site-per-process",
-                "--disable-site-isolation-trials",
-            ],
+            proxy=proxy_config,
+            geoip=True if proxy_config else False,
+            humanize=0.5,
         )
+        self._browser = await self._camoufox_manager.__aenter__()
 
     async def stop(self):
-        if self._browser:
+        if hasattr(self, '_camoufox_manager') and self._camoufox_manager:
+            await self._camoufox_manager.__aexit__(None, None, None)
+        elif self._browser:
             await self._browser.close()
-        if self._pw:
-            await self._pw.stop()
 
     async def _new_page(self):
         ctx = await self._browser.new_context(
-            user_agent=random.choice([
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-            ]),
             locale="en-IN",
             timezone_id="Asia/Kolkata",
             permissions=["geolocation"],
         )
         page = await ctx.new_page()
-        try:
-            await Stealth().apply_stealth_async(page)
-        except Exception:
-            pass
+        
+        # Abort unnecessary resources to save RAM and speed up
         await page.route("**/*.{png,jpg,jpeg,woff,woff2,gif,webp,svg}", lambda r: r.abort())
         await page.route("**/maps/vt/**", lambda r: r.abort())
         await page.route("**/maps/viewer/**", lambda r: r.abort())
@@ -159,7 +138,15 @@ class GMapsScraperV2:
             searched.add(area)
             areas_done += 1
 
-            leads, new_areas = await self._scrape_area(query, city, area, seen_hashes, limit=max_per_city - len(all_leads))
+            try:
+                leads, new_areas = await asyncio.wait_for(
+                    self._scrape_area(query, city, area, seen_hashes, limit=max_per_city - len(all_leads)),
+                    timeout=90,
+                )
+            except asyncio.TimeoutError:
+                self.progress(f"  [TIMEOUT] Skipped slow area: {area} in {city} (>90s)")
+                new_areas = []
+                leads = []
             all_leads.extend(leads)
 
             new_discovered = [a for a in new_areas if a not in searched and a not in discovered and a not in known_areas]
@@ -201,13 +188,13 @@ class GMapsScraperV2:
                 await asyncio.sleep(2)
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
-            await asyncio.sleep(random.uniform(2.5, 3.5))
+            await asyncio.sleep(random.uniform(1.5, 2.5))
 
             panel = await page.query_selector('[role="feed"]')
             if panel:
-                for _ in range(6):
+                for _ in range(4):
                     await panel.evaluate("el => el.scrollTop += 800")
-                    await asyncio.sleep(random.uniform(0.6, 1.0))
+                    await asyncio.sleep(random.uniform(0.3, 0.6))
 
             listings = (
                 await page.query_selector_all('[data-result-index]') or
@@ -229,7 +216,7 @@ class GMapsScraperV2:
                             new_areas.extend(areas)
                 except Exception as e:
                     logger.debug(f"Extract error in {area}: {e}")
-                await asyncio.sleep(random.uniform(0.4, 0.8))
+                await asyncio.sleep(random.uniform(0.2, 0.4))
 
         except Exception as e:
             self.progress(f"  GMaps error in {area}: {e}")
@@ -249,7 +236,7 @@ class GMapsScraperV2:
             await listing.click(force=True, position={"x": 15, "y": 15})
 
             name = ""
-            for _ in range(15):
+            for _ in range(8):
                 for sel in ["h1.DUwDvf", ".fontHeadlineLarge", "h1.qAWA2"]:
                     el = await page.query_selector(sel)
                     if el:
@@ -261,7 +248,7 @@ class GMapsScraperV2:
                                 break
                 if name:
                     break
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.15)
 
             if not name:
                 return None, []

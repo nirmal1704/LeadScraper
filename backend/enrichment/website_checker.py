@@ -7,7 +7,7 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 10
-CONCURRENCY = 30
+CONCURRENCY = 15
 
 # Status codes that signal an active site blocked by a WAF/Cloudflare
 _ACTIVE_CODES = {401, 403, 405, 406, 429, 503}

@@ -25,8 +25,8 @@ from urllib.parse import quote, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from playwright.async_api import async_playwright
-from playwright_stealth import Stealth
+import os
+from camoufox.async_api import AsyncCamoufox
 
 logger = logging.getLogger(__name__)
 
@@ -208,41 +208,30 @@ class GenericScraper:
 
     async def start(self):
         try:
-            self._pw = await async_playwright().start()
-            self._browser = await self._pw.chromium.launch(
+            proxy_url = os.getenv("PROXY_URL")
+            proxy_config = {"server": proxy_url} if proxy_url else None
+            
+            self._camoufox_manager = AsyncCamoufox(
                 headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-webgl",
-                    "--disable-3d-apis",
-                    "--disable-software-rasterizer",
-                    "--js-flags=--max-old-space-size=48",
-                ],
+                proxy=proxy_config,
+                geoip=True if proxy_config else False,
             )
+            self._browser = await self._camoufox_manager.__aenter__()
         except Exception as e:
             logger.warning(f"GenericScraper browser launch failed (will use httpx only): {e}")
 
     async def stop(self):
-        if self._browser:
+        if hasattr(self, '_camoufox_manager') and self._camoufox_manager:
+            await self._camoufox_manager.__aexit__(None, None, None)
+        elif self._browser:
             await self._browser.close()
-        if self._pw:
-            await self._pw.stop()
 
     async def _new_page(self):
         ctx = await self._browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
             locale="en-IN",
             timezone_id="Asia/Kolkata",
         )
         page = await ctx.new_page()
-        try:
-            stealth = Stealth()
-            await stealth.apply_stealth_async(page)
-        except Exception:
-            pass
         await page.route(
             "**/*.{png,jpg,jpeg,woff,woff2,gif,webp,svg}",
             lambda route: route.abort()

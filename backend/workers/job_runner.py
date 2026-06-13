@@ -14,7 +14,7 @@ from llm.query_generator import generate_search_plan
 from scrapers.gmaps_scraper import GMapsScraperV2
 from scrapers.generic_scraper import GenericScraper
 from enrichment.website_checker import check_websites_batch
-from enrichment.scorer import score_leads_batch, apply_filters_batch
+from enrichment.scorer import score_leads_batch, apply_filters_batch, normalize_socials, apply_filters
 from enrichment.profile_enricher import enrich_social_profiles
 
 logger = logging.getLogger(__name__)
@@ -299,6 +299,14 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
         if plan.get("free_tier_cap_applied"):
             log("Free-tier cap applied: focused batch mode.")
 
+        def _can_prefilter(f: dict) -> bool:
+            field = f.get("field", "")
+            if field in ("website_status", "has_https", "has_mobile_meta", "score", "priority", "follower_count"):
+                return False
+            return True
+
+        pre_filters = [f for f in active_filters if _can_prefilter(f)] if active_filters else []
+
         random.shuffle(cities)
         random.shuffle(queries)
         _set_status(db, user_id, job_id, "running", {"plan": plan})
@@ -323,6 +331,9 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
 
                 batch_leads, intent = item
                 try:
+                    # Social profile enrichment
+                    batch_leads = await enrich_social_profiles(batch_leads)
+
                     # Website enrichment
                     web_results = await check_websites_batch(batch_leads)
                     for lead in batch_leads:
@@ -333,9 +344,6 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             lead["website_status"] = result.status
                             lead["has_https"] = result.has_https
                             lead["has_mobile_meta"] = result.has_mobile_meta
-
-                    # Social profile enrichment
-                    batch_leads = await enrich_social_profiles(batch_leads)
 
                     # Score with enriched data
                     score_leads_batch(batch_leads, filters=active_filters)
@@ -370,11 +378,18 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
             for lead in raw_leads:
                 lead.setdefault("lead_intent", intent)
                 lead.setdefault("id", str(uuid.uuid4()))
+                normalize_socials(lead)
+
+            if pre_filters:
+                raw_leads = [l for l in raw_leads if apply_filters(l, pre_filters)]
+
+            if not raw_leads:
+                return 0
 
             # Dedup
             new_leads: list[dict] = []
             async with dedup_lock:
-                ceiling = max_leads * (3 if active_filters else 1)
+                ceiling = max_leads * (1.5 if active_filters else 1)
                 for lead in raw_leads:
                     if len(all_leads) + len(new_leads) >= ceiling:
                         break
@@ -408,10 +423,14 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
 
         async def _check_streak(source_key: str) -> bool:
             """Return True if this source should be aborted due to too many zero-yield combos."""
+            if active_filters:
+                return False
             async with streak_lock:
                 return zero_streak.get(source_key, 0) >= ZERO_YIELD_ABORT
 
         async def _update_streak(source_key: str, yielded: int):
+            if active_filters:
+                return
             async with streak_lock:
                 if yielded == 0:
                     zero_streak[source_key] = zero_streak.get(source_key, 0) + 1

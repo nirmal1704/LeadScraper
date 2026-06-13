@@ -233,11 +233,19 @@ def _extract_from_html(html: str, url: str) -> dict:
 
 # ── Main enrichment functions ─────────────────────────────────────────────────
 
-async def _enrich_one(client: httpx.AsyncClient, lead: dict) -> dict:
+def _get_enrichable_url(lead: dict) -> str | None:
+    if lead.get("instagram_handle"):
+        return f"https://instagram.com/{lead['instagram_handle']}"
     url = lead.get("website")
-    if not url or not _is_enrichable(url):
-        return lead
+    if url and _is_enrichable(url):
+        return url
+    for link in (lead.get("social_links") or "").split(","):
+        link = link.strip()
+        if _is_enrichable(link):
+            return link
+    return None
 
+async def _enrich_one(client: httpx.AsyncClient, lead: dict, url: str) -> dict:
     try:
         r = await client.get(url, timeout=TIMEOUT, follow_redirects=True)
         if r.status_code not in (200, 403):
@@ -254,7 +262,9 @@ async def _enrich_one(client: httpx.AsyncClient, lead: dict) -> dict:
         if extracted.get("follower_count"):
             lead["follower_count"] = extracted["follower_count"]
         if extracted.get("external_link") and not lead.get("website"):
-            lead["external_link"] = extracted["external_link"]
+            lead["website"] = extracted["external_link"]
+            # Clear status so website_checker will process it
+            lead["website_status"] = None
 
     except Exception as e:
         logger.debug(f"Profile enrich failed for {url}: {e}")
@@ -264,19 +274,24 @@ async def _enrich_one(client: httpx.AsyncClient, lead: dict) -> dict:
 
 async def enrich_social_profiles(leads: list[dict]) -> list[dict]:
     """Batch-enrich social profile leads from OG tags / embedded JSON."""
-    to_enrich = [l for l in leads if _is_enrichable(l.get("website", ""))]
+    to_enrich = []
+    for l in leads:
+        url = _get_enrichable_url(l)
+        if url:
+            to_enrich.append((l, url))
+            
     if not to_enrich:
         return leads
 
     sem = asyncio.Semaphore(CONCURRENCY)
     async with httpx.AsyncClient(headers={"User-Agent": _UA}, verify=False) as client:
-        async def _bounded(lead):
+        async def _bounded(lead, url):
             async with sem:
-                return await _enrich_one(client, lead)
+                return await _enrich_one(client, lead, url)
 
-        results = await asyncio.gather(*[_bounded(l) for l in to_enrich], return_exceptions=True)
+        results = await asyncio.gather(*[_bounded(l, u) for l, u in to_enrich], return_exceptions=True)
 
-    for original, result in zip(to_enrich, results):
+    for (original, _), result in zip(to_enrich, results):
         if isinstance(result, dict):
             original.update(result)
 
