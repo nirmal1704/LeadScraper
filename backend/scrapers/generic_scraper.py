@@ -215,6 +215,8 @@ class GenericScraper:
                 headless=True,
                 proxy=proxy_config,
                 geoip=True if proxy_config else False,
+                locale="en-IN",
+                block_images=True,
             )
             self._browser = await self._camoufox_manager.__aenter__()
         except Exception as e:
@@ -227,14 +229,14 @@ class GenericScraper:
             await self._browser.close()
 
     async def _new_page(self):
-        ctx = await self._browser.new_context(
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-        )
-        page = await ctx.new_page()
+        page = await self._browser.new_page()
+        
+        async def _abort(route):
+            await route.abort()
+            
         await page.route(
             "**/*.{png,jpg,jpeg,woff,woff2,gif,webp,svg}",
-            lambda route: route.abort()
+            _abort
         )
         return page
 

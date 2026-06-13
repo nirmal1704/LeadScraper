@@ -85,6 +85,8 @@ class GMapsScraperV2:
             proxy=proxy_config,
             geoip=True if proxy_config else False,
             humanize=0.5,
+            locale="en-IN",
+            block_images=True,
         )
         self._browser = await self._camoufox_manager.__aenter__()
 
@@ -95,17 +97,15 @@ class GMapsScraperV2:
             await self._browser.close()
 
     async def _new_page(self):
-        ctx = await self._browser.new_context(
-            locale="en-IN",
-            timezone_id="Asia/Kolkata",
-            permissions=["geolocation"],
-        )
-        page = await ctx.new_page()
+        page = await self._browser.new_page()
         
+        async def _abort(route):
+            await route.abort()
+            
         # Abort unnecessary resources to save RAM and speed up
-        await page.route("**/*.{png,jpg,jpeg,woff,woff2,gif,webp,svg}", lambda r: r.abort())
-        await page.route("**/maps/vt/**", lambda r: r.abort())
-        await page.route("**/maps/viewer/**", lambda r: r.abort())
+        await page.route("**/*.{png,jpg,jpeg,woff,woff2,gif,webp,svg}", _abort)
+        await page.route("**/maps/vt/**", _abort)
+        await page.route("**/maps/viewer/**", _abort)
         return page
 
     async def scrape_city(self, query: str, city: str, max_per_city: int = 50, max_areas: int = 6) -> list[dict]:
