@@ -34,12 +34,11 @@ RENDER_FREE_TIER: bool = os.getenv("RENDER_FREE_TIER", "false").lower() == "true
 MAX_CONCURRENT_JOBS = 1 if RENDER_FREE_TIER else 2
 _job_semaphore = threading.Semaphore(MAX_CONCURRENT_JOBS)
 
-GMAPS_PAGE_CONCURRENCY: int = 1 if RENDER_FREE_TIER else 2
+GMAPS_PAGE_CONCURRENCY: int = 1
 GENERIC_CONCURRENCY: int = 1
-GMAPS_BATCH_SIZE: int = 1 if RENDER_FREE_TIER else 6
+GMAPS_BATCH_SIZE: int = 1
 GENERIC_USE_BROWSER: bool = not RENDER_FREE_TIER
 LEAD_BUFFER_FLUSH_SIZE = 50
-ZERO_YIELD_ABORT = 5      # consecutive zero-yield combos before aborting a source
 
 SOCIAL_SOURCES = {
     "instagram.com", "linkedin.com", "x.com", "twitter.com",
@@ -108,94 +107,6 @@ def _make_dedup_key(lead: dict) -> str:
     )
 
 
-def _norm_name(name: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
-
-
-def _name_similarity(a: str, b: str) -> float:
-    """Bigram Jaccard similarity — fast, no external libraries."""
-    def bigrams(s):
-        return {s[i:i+2] for i in range(len(s) - 1)} if len(s) >= 2 else set()
-    ba, bb = bigrams(a), bigrams(b)
-    if not ba and not bb:
-        return 1.0
-    if not ba or not bb:
-        return 0.0
-    return len(ba & bb) / len(ba | bb)
-
-
-def _merge_lead_pair(winner: dict, other: dict) -> dict:
-    """Merge social/contact data from `other` into `winner`, keeping the richer values."""
-    for field in ("email", "phone", "instagram_handle", "follower_count", "bio", "external_link"):
-        if not winner.get(field) and other.get(field):
-            winner[field] = other[field]
-    if other.get("has_instagram"):
-        winner["has_instagram"] = True
-    # Merge social_links
-    existing = set((winner.get("social_links") or "").split(", "))
-    incoming = set((other.get("social_links") or "").split(", "))
-    merged = sorted(existing | incoming - {""})
-    if merged:
-        winner["social_links"] = ", ".join(merged)
-    # Keep higher score
-    if (other.get("score") or 0) > (winner.get("score") or 0):
-        winner["score"] = other["score"]
-        winner["priority"] = other["priority"]
-    return winner
-
-
-def merge_cross_platform_leads(leads: list[dict]) -> list[dict]:
-    """
-    Group leads by (normalized name, city) similarity and merge duplicates.
-    A lead found on Instagram AND LinkedIn for the same person becomes one
-    richly-populated record instead of two sparse ones.
-
-    Similarity threshold: 80% bigram Jaccard on normalized name, same city.
-    """
-    if not leads:
-        return leads
-
-    clusters: list[list[dict]] = []
-    assigned = [False] * len(leads)
-
-    for i, lead in enumerate(leads):
-        if assigned[i]:
-            continue
-        cluster = [lead]
-        assigned[i] = True
-        ni = _norm_name(lead.get("name", ""))
-        ci = re.sub(r"[^a-z]", "", (lead.get("city") or "").lower())
-
-        for j in range(i + 1, len(leads)):
-            if assigned[j]:
-                continue
-            other = leads[j]
-            nj = _norm_name(other.get("name", ""))
-            cj = re.sub(r"[^a-z]", "", (other.get("city") or "").lower())
-
-            if ci != cj:
-                continue
-            if len(ni) < 4 or len(nj) < 4:
-                continue
-            if _name_similarity(ni, nj) >= 0.80:
-                cluster.append(other)
-                assigned[j] = True
-
-        clusters.append(cluster)
-
-    merged_leads = []
-    for cluster in clusters:
-        if len(cluster) == 1:
-            merged_leads.append(cluster[0])
-            continue
-        # Winner = lead with highest score, or first if tied
-        winner = max(cluster, key=lambda l: l.get("score") or 0)
-        for other in cluster:
-            if other is not winner:
-                winner = _merge_lead_pair(winner, other)
-        merged_leads.append(winner)
-
-    return merged_leads
 
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
@@ -248,10 +159,6 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
     progress_lock = asyncio.Lock()
     gmaps_sem = asyncio.Semaphore(GMAPS_PAGE_CONCURRENCY)
     generic_sem = asyncio.Semaphore(GENERIC_CONCURRENCY)
-
-    # #3: zero-yield streak tracking per source key
-    zero_streak: dict[str, int] = {}
-    streak_lock = asyncio.Lock()
 
     # #9: background enrichment queue
     enrich_queue: asyncio.Queue = asyncio.Queue()
@@ -419,23 +326,6 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
             log(f"[{pct}%] {label} — {n} leads ({done}/{total_combos} combos done)")
             return yielded
 
-        # ── #3: Zero-yield streak check ───────────────────────────────────────
-
-        async def _check_streak(source_key: str) -> bool:
-            """Return True if this source should be aborted due to too many zero-yield combos."""
-            if active_filters:
-                return False
-            async with streak_lock:
-                return zero_streak.get(source_key, 0) >= ZERO_YIELD_ABORT
-
-        async def _update_streak(source_key: str, yielded: int):
-            if active_filters:
-                return
-            async with streak_lock:
-                if yielded == 0:
-                    zero_streak[source_key] = zero_streak.get(source_key, 0) + 1
-                else:
-                    zero_streak[source_key] = 0
 
         # ── GMaps phase ───────────────────────────────────────────────────────
         if "gmaps" in active_sources:
@@ -448,15 +338,12 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         return
                     if "online" in query.lower() and lead_intent == "online":
                         return
-                    if await _check_streak("gmaps"):
-                        return
 
                     ckey = _cache_key(query, city, "gmaps")
                     cached = await asyncio.to_thread(_get_cached_leads, db, ckey)
                     if cached:
                         n = await _process_leads(cached, intent=lead_intent)
                         await _tick(f"GMaps '{query}' in {city} [cached]", n)
-                        await _update_streak("gmaps", n)
                         return
 
                     async with gmaps_sem:
@@ -473,7 +360,6 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
 
                     n = await _process_leads(raw, intent=lead_intent)
                     await _tick(f"GMaps '{query}' in {city}", n)
-                    await _update_streak("gmaps", n)
 
                 gmaps_tasks = [_gmaps_combo(q, c) for c in cities for q in queries]
                 for i in range(0, len(gmaps_tasks), GMAPS_BATCH_SIZE):
@@ -486,7 +372,7 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                 ig_limit = 5 if RENDER_FREE_TIER else 10
                 if no_web and not stop():
                     log(f"Instagram lookup for {min(len(no_web), ig_limit)} leads...")
-                    ig_sem = asyncio.Semaphore(1 if RENDER_FREE_TIER else 3)
+                    ig_sem = asyncio.Semaphore(1)
 
                     async def _fetch_ig(lead: dict):
                         if stop():
@@ -517,8 +403,6 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                 async def _generic_combo(source: str, query: str, city: str):
                     if stop() or len(all_leads) >= max_leads:
                         return
-                    if await _check_streak(source):
-                        return
                     async with generic_sem:
                         if stop() or len(all_leads) >= max_leads:
                             return
@@ -536,12 +420,9 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             raw = []
                     n = await _process_leads(raw, intent=lead_intent)
                     await _tick(f"{source} '{query}' in {city}", n)
-                    await _update_streak(source, n)
 
                 async def _social_combo(platform: str, query: str, city: str):
                     if stop() or len(all_leads) >= max_leads:
-                        return
-                    if await _check_streak(platform):
                         return
 
                     ckey = _cache_key(query, city, platform)
@@ -552,7 +433,6 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             lead["source"] = platform_keyword.capitalize()
                         n = await _process_leads(cached, intent=lead_intent)
                         await _tick(f"{platform} '{query}' in {city} [cached]", n)
-                        await _update_streak(platform, n)
                         return
 
                     async with generic_sem:
@@ -577,12 +457,9 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             raw = []
                     n = await _process_leads(raw, intent=lead_intent)
                     await _tick(f"{platform} '{query}' in {city}", n)
-                    await _update_streak(platform, n)
 
                 async def _web_combo(query: str, city: str):
                     if stop() or len(all_leads) >= max_leads:
-                        return
-                    if await _check_streak("web"):
                         return
                     async with generic_sem:
                         if stop() or len(all_leads) >= max_leads:
@@ -601,7 +478,6 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                             raw = []
                     n = await _process_leads(raw, intent=lead_intent)
                     await _tick(f"Web '{query[:40]}' in {city}", n)
-                    await _update_streak("web", n)
 
                 social_q_limit = 3 if RENDER_FREE_TIER else 5
                 all_tasks: list = []
@@ -620,7 +496,7 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                         for c in cities:
                             all_tasks.append(_web_combo(q, c))
 
-                generic_batch_size = 1 if RENDER_FREE_TIER else 3
+                generic_batch_size = 1
                 for i in range(0, len(all_tasks), generic_batch_size):
                     if stop() or len(all_leads) >= max_leads:
                         break
@@ -632,21 +508,20 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                     await gen.stop()
                 gc.collect()
 
-        # ── #9: Wait for background enrichment to drain ───────────────────────
+        # ── Wait for background enrichment to drain ─────────────────────────
         enrich_done.set()
         log("Enriching leads in background...")
-        await enrich_queue.join()
+        try:
+            await asyncio.wait_for(enrich_queue.join(), timeout=120)
+        except asyncio.TimeoutError:
+            log("[WARN] Enrichment timed out — some leads may have partial data.")
         await enrich_queue.put(None)  # sentinel to stop worker
-        await enrich_task
+        try:
+            await asyncio.wait_for(enrich_task, timeout=30)
+        except asyncio.TimeoutError:
+            enrich_task.cancel()
 
-        # ── #2: Cross-platform dedup & merge ─────────────────────────────────
-        before = len(all_leads)
-        all_leads[:] = merge_cross_platform_leads(all_leads)
-        merged_away = before - len(all_leads)
-        if merged_away > 0:
-            log(f"Cross-platform merge: {merged_away} duplicates merged into richer records")
-            # Persist merged winners (overwrite) — orphaned leads will age out naturally
-            await asyncio.to_thread(_save_leads, db, user_id, job_id, all_leads, True)
+
 
         if stop():
             log("Job was stopped by user.")

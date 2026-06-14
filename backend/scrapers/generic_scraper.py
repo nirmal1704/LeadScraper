@@ -210,7 +210,7 @@ class GenericScraper:
         try:
             proxy_url = os.getenv("PROXY_URL")
             proxy_config = {"server": proxy_url} if proxy_url else None
-            
+
             self._camoufox_manager = AsyncCamoufox(
                 headless=True,
                 proxy=proxy_config,
@@ -220,17 +220,37 @@ class GenericScraper:
             self._browser = await self._camoufox_manager.__aenter__()
         except Exception as e:
             logger.warning(f"GenericScraper browser launch failed (will use httpx only): {e}")
+            self._browser = None
 
     async def stop(self):
-        if hasattr(self, '_camoufox_manager') and self._camoufox_manager:
-            await self._camoufox_manager.__aexit__(None, None, None)
-        elif self._browser:
-            await self._browser.close()
+        if self._camoufox_manager:
+            try:
+                await self._camoufox_manager.__aexit__(None, None, None)
+            except Exception:
+                pass
+        self._camoufox_manager = None
+        self._browser = None
 
     async def _new_page(self):
-        # Add a timeout so that Playwright deadlocks do not hang the thread indefinitely
-        page = await asyncio.wait_for(self._browser.new_page(), timeout=30.0)
-        return page
+        """
+        Open a fully-isolated page via a new BrowserContext.
+        Caller must call _close_page_ctx(page) when done.
+        """
+        ctx = await asyncio.wait_for(
+            self._browser.new_context(locale="en-IN"),
+            timeout=15.0,
+        )
+        return await asyncio.wait_for(ctx.new_page(), timeout=15.0)
+
+    async def _close_page_ctx(self, page) -> None:
+        """Safely close a page and its isolated context."""
+        try:
+            await page.context.close()
+        except Exception:
+            try:
+                await page.close()
+            except Exception:
+                pass
 
     # ── Strategy A: Google Dork (site:{domain}) ────────────────────────────
 
@@ -276,11 +296,7 @@ class GenericScraper:
             logger.debug(f"Google dork failed: {e}")
         finally:
             if page:
-                if page.context == self._browser:
-                    await page.context.clear_cookies()
-                    await page.close()
-                else:
-                    await page.context.close()
+                await self._close_page_ctx(page)
         return leads
 
     # ── Strategy B: Direct Google Web Search ──────────────────────────────
@@ -326,11 +342,7 @@ class GenericScraper:
             logger.debug(f"Google web search failed: {e}")
         finally:
             if page:
-                if page.context == self._browser:
-                    await page.context.clear_cookies()
-                    await page.close()
-                else:
-                    await page.context.close()
+                await self._close_page_ctx(page)
         return leads
 
     # ── Strategy C: DuckDuckGo HTML (httpx, no browser needed) ────────────

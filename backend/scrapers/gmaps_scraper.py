@@ -68,18 +68,36 @@ def _is_closed(text: str) -> bool:
     return any(s in t for s in _CLOSED_SIGNALS)
 
 
+async def _close_page_ctx(page) -> None:
+    """
+    Safely close a page and its context.
+    With Camoufox / Playwright each page belongs to a BrowserContext.
+    We always close the *context* (which also closes the page) so we don't
+    leak isolated contexts over time.
+    Silently swallows errors so a cleanup failure never kills the job.
+    """
+    try:
+        ctx = page.context
+        await ctx.close()
+    except Exception:
+        try:
+            await page.close()
+        except Exception:
+            pass
+
+
 class GMapsScraperV2:
     def __init__(self, db=None, progress_cb=None, stop_flag=None):
         self.db = db
         self.progress = progress_cb or (lambda msg: logger.info(msg))
         self.stop_flag = stop_flag or (lambda: False)
-        self._pw = None
+        self._camoufox_manager = None
         self._browser = None
 
     async def start(self):
         proxy_url = os.getenv("PROXY_URL")
         proxy_config = {"server": proxy_url} if proxy_url else None
-        
+
         self._camoufox_manager = AsyncCamoufox(
             headless=True,
             proxy=proxy_config,
@@ -90,20 +108,37 @@ class GMapsScraperV2:
         self._browser = await self._camoufox_manager.__aenter__()
 
     async def stop(self):
-        if hasattr(self, '_camoufox_manager') and self._camoufox_manager:
-            await self._camoufox_manager.__aexit__(None, None, None)
-        elif self._browser:
-            await self._browser.close()
+        if self._camoufox_manager:
+            try:
+                await self._camoufox_manager.__aexit__(None, None, None)
+            except Exception:
+                pass
+        self._camoufox_manager = None
+        self._browser = None
 
     async def _new_page(self):
-        page = await asyncio.wait_for(self._browser.new_page(), timeout=30.0)
-        
+        """
+        Open a fully-isolated page via a new BrowserContext.
+        This means cookies / session storage from one search can NEVER
+        contaminate another search — critical for avoiding rate-limit spillover.
+        The caller is responsible for calling _close_page_ctx(page) when done.
+        """
+        ctx = await asyncio.wait_for(
+            self._browser.new_context(
+                locale="en-IN",
+                timezone_id="Asia/Kolkata",
+            ),
+            timeout=15.0,
+        )
+        page = await asyncio.wait_for(ctx.new_page(), timeout=15.0)
+
         async def _abort(route):
             await route.abort()
-            
-        # Abort heavy maps data to save RAM
+
+        # Block heavy map tiles and images to reduce RAM usage
         await page.route("**/maps/vt/**", _abort)
         await page.route("**/maps/viewer/**", _abort)
+        await page.route("**/*.{png,jpg,jpeg,woff,woff2,gif,webp}", _abort)
         return page
 
     async def scrape_city(self, query: str, city: str, max_per_city: int = 50, max_areas: int = 6) -> list[dict]:
@@ -153,7 +188,7 @@ class GMapsScraperV2:
                 area_queue.append(a)
 
             if new_discovered and self.db:
-                def _save_areas(_new=new_discovered, _city=city):
+                def _save_areas(_new=list(new_discovered), _city=city):
                     try:
                         ref = self.db.collection("geography").document("india").collection("cities").document(_city)
                         doc = ref.get()
@@ -218,14 +253,11 @@ class GMapsScraperV2:
                 await asyncio.sleep(random.uniform(0.2, 0.4))
 
         except Exception as e:
-            self.progress(f"  GMaps error in {area}: {e}")
+            self.progress(f"  GMaps error in {area}: {e.__class__.__name__}: {e}")
         finally:
             if page:
-                if page.context == self._browser:
-                    await page.context.clear_cookies()
-                    await page.close()
-                else:
-                    await page.context.close()
+                await _close_page_ctx(page)
+
         return leads, list(set(new_areas))
 
     async def _extract(self, page, listing, city: str, area: str, query: str):
@@ -233,13 +265,15 @@ class GMapsScraperV2:
             card_text = (await listing.inner_text()).strip()
             card_name = card_text.splitlines()[0].strip() if card_text else ""
 
+            # Fast-reject closed businesses from the card text
             if _is_closed(card_text):
                 return None, []
 
             await listing.click(force=True, position={"x": 15, "y": 15})
 
+            # Poll until the details panel shows a name matching the card
             name = ""
-            for _ in range(8):
+            for _ in range(10):
                 for sel in ["h1.DUwDvf", ".fontHeadlineLarge", "h1.qAWA2"]:
                     el = await page.query_selector(sel)
                     if el:
@@ -251,7 +285,7 @@ class GMapsScraperV2:
                                 break
                 if name:
                     break
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.2)
 
             if not name:
                 return None, []
@@ -265,6 +299,7 @@ class GMapsScraperV2:
             if not name_matches:
                 return None, []
 
+            # Double-check panel for closed status
             panel_text = ""
             try:
                 panel_text = (await page.inner_text("div.m6QErb", timeout=1500)).lower()
@@ -279,17 +314,20 @@ class GMapsScraperV2:
             except Exception:
                 pass
 
+            # Extract Phone
             phone = ""
             phone_el = await page.query_selector('[data-item-id*="phone"] .Io6YTe')
             if phone_el:
                 phone = re.sub(r"[^\d+\-\s]", "", (await phone_el.inner_text()).strip())
 
+            # Extract Address
             address = ""
             addr_el = await page.query_selector('[data-item-id="address"] .Io6YTe')
             if addr_el:
                 address = (await addr_el.inner_text()).strip()
             new_areas = _extract_areas_from_address(address, city)
 
+            # Extract Rating & Review count
             rating, review_count = None, None
             rating_el = await page.query_selector('.F7nice span[aria-label*="star"]')
             if rating_el:
@@ -302,6 +340,7 @@ class GMapsScraperV2:
                 if m:
                     review_count = int(m.group(1).replace(",", ""))
 
+            # Extract Category
             category = None
             for sel in [".DkEaL", ".y7PRA", "button.DkEaL"]:
                 el = await page.query_selector(sel)
@@ -311,6 +350,7 @@ class GMapsScraperV2:
                         category = t
                         break
 
+            # Extract Open/Closed status
             open_now = None
             try:
                 hours_el = await page.query_selector(".o0Svhf")
@@ -320,14 +360,19 @@ class GMapsScraperV2:
             except Exception:
                 pass
 
+            # Extract Website and Social Links
             website, social_links = "", []
+            _SOCIAL_DOMAINS = [
+                "justdial.com", "facebook.com", "instagram.com", "linkedin.com",
+                "linktr.ee", "twitter.com", "x.com", "wa.me", "whatsapp.com", "youtube.com",
+            ]
             for sel in ['a[data-item-id="authority"]', '[data-item-id="authority"] a']:
                 web_el = await page.query_selector(sel)
                 if web_el:
                     href = await web_el.get_attribute("href") or ""
                     if href and "google.com/maps" not in href and "google.com/search" not in href:
                         lower = href.lower()
-                        if any(d in lower for d in ["justdial.com", "facebook.com", "instagram.com", "linkedin.com", "linktr.ee", "twitter.com", "x.com", "wa.me", "whatsapp.com", "youtube.com"]):
+                        if any(d in lower for d in _SOCIAL_DOMAINS):
                             social_links.append(href)
                         else:
                             website = href
@@ -335,16 +380,18 @@ class GMapsScraperV2:
 
             try:
                 profiles = await page.query_selector_all(
-                    'a[href*="instagram.com"], a[href*="facebook.com"], a[href*="linkedin.com"], a[href*="youtube.com"], a[href*="justdial.com"]'
+                    'a[href*="instagram.com"], a[href*="facebook.com"], '
+                    'a[href*="linkedin.com"], a[href*="youtube.com"], a[href*="justdial.com"]'
                 )
                 for p in profiles:
                     href = await p.get_attribute("href")
                     if href and "google.com" not in href and href not in social_links and href != website:
-                        if any(d in href.lower() for d in ["justdial", "facebook", "instagram", "linkedin", "linktr", "twitter", "x.com", "wa.me", "whatsapp", "youtube"]):
+                        if any(d in href.lower() for d in _SOCIAL_DOMAINS):
                             social_links.append(href)
             except Exception:
                 pass
 
+            # Build confidence score
             confidence = 55
             evidence = []
             if name_matches:
@@ -416,8 +463,4 @@ class GMapsScraperV2:
             return False, None
         finally:
             if page:
-                if page.context == self._browser:
-                    await page.context.clear_cookies()
-                    await page.close()
-                else:
-                    await page.context.close()
+                await _close_page_ctx(page)
