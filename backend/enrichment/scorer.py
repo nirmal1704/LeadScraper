@@ -147,6 +147,13 @@ def apply_filters_batch(leads: list[dict], filters: list[dict]) -> list[dict]:
     return result
 
 
+def is_website_opportunity_search(filters: list[dict]) -> bool:
+    for f in filters:
+        field = f.get("field", "")
+        if field in ("website", "website_status", "has_https", "has_mobile_meta"):
+            return True
+    return False
+
 def score_lead(lead: dict, filters: list[dict] | None = None) -> tuple[int, str]:
     """Score a lead 0–100 and assign a priority tier."""
     filters = filters or []
@@ -166,28 +173,8 @@ def score_lead(lead: dict, filters: list[dict] | None = None) -> tuple[int, str]
         lead["lead_type"] = "Permanently closed — skip"
         return 0, "Skip"
 
-    if filters:
-        score = 50
-        if has_email:            score += 20
-        if has_phone:            score += 12
-        if has_instagram:        score += 6
-        if review_count >= 50:   score += 8
-        elif review_count >= 10: score += 4
-        if rating >= 4.0:        score += 4
-        elif rating >= 3.0:      score += 2
-        if website and website_status == "Up": score += 3
-        if has_https:            score += 2
-        if has_mobile_meta:      score += 1
-        if lead.get("category"): score += 2
-        # Social presence signals (from profile_enricher)
-        if follower_count >= 100_000:  score += 10
-        elif follower_count >= 10_000: score += 6
-        elif follower_count >= 1_000:  score += 3
-        if lead.get("bio") and has_email: score += 4  # public email in bio = hot signal
-        score = min(score, 100)
-        if not lead.get("lead_type"):
-            lead["lead_type"] = "Matched filter criteria"
-    else:
+    if is_website_opportunity_search(filters):
+        # Opportunity scoring (Targeting missing/broken websites)
         if not website:
             score = 90 if lead_intent == "physical" else 85
             lead["lead_type"] = lead.get("lead_type") or (
@@ -207,12 +194,39 @@ def score_lead(lead: dict, filters: list[dict] | None = None) -> tuple[int, str]
             lead["lead_type"] = "Working website"
 
         if has_email:                          score += 12 if lead_intent == "online" else 8
+        if has_phone:                          score += 12
         if not website and review_count >= 10: score += 5
         if not website and has_instagram:      score += 3
         if (lead.get("has_zomato") or lead.get("has_swiggy")) and not website: score += 4
         if lead.get("category"):
+            score += 2
             lead["confidence"] = min((lead.get("confidence") or 55) + 5, 100)
-        score = min(score, 100)
+    else:
+        # Standard Quality scoring (Targeting good, reachable leads)
+        score = 50
+        if website and website_status == "Up": score += 15
+        if has_https:                          score += 5
+        if has_email:                          score += 15
+        if has_phone:                          score += 10
+        if has_instagram:                      score += 5
+        if lead.get("category"):
+            score += 5
+            lead["confidence"] = min((lead.get("confidence") or 55) + 5, 100)
+        
+        if not lead.get("lead_type"):
+            lead["lead_type"] = "Matched search criteria"
+
+    # Common boosts for both modes
+    if review_count >= 50:                 score += 8
+    elif review_count >= 10:               score += 4
+    if rating >= 4.0:                      score += 4
+    elif rating >= 3.0:                    score += 2
+    if follower_count >= 100_000:          score += 10
+    elif follower_count >= 10_000:         score += 6
+    elif follower_count >= 1_000:          score += 3
+    if lead.get("bio") and has_email:      score += 4
+
+    score = min(score, 100)
 
     if score >= 85:   priority = "Hot"
     elif score >= 65: priority = "Warm"

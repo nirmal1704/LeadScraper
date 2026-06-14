@@ -111,6 +111,9 @@ Discovery / community:
   - "producthunt.com" → SaaS products, indie makers, app founders
   - "github.com"      → developers, open-source maintainers
 
+Finance / Corporate:
+  - "sebi.gov.in"     → financial advisors, wealth managers, stock brokers, mutual fund distributors
+
 === FILTERS — FULLY OPEN-ENDED PREDICATES ===
 If the user states ANY qualification or selection criteria (e.g. "who need a website",
 "with fewer than 100 reviews", "no HTTPS", "have email", "rating below 3",
@@ -190,7 +193,8 @@ max_areas: neighbourhoods per city (default 5, max 8)
 3. NEVER echo the user's raw sentence as a query — decompose into short terms
 4. online/web_first plans: OMIT gmaps from sources
 5. physical/hybrid plans: ALWAYS include gmaps
-6. Respond ONLY with valid JSON. No explanation. No markdown fences.
+6. If the user mentions financial advisors, stock brokers, wealth managers, or SEBI, YOU MUST INCLUDE "sebi.gov.in" in sources.
+7. Respond ONLY with valid JSON. No explanation. No markdown fences.
 """
 
 USER_PROMPT = "User wants: {user_query}"
@@ -405,6 +409,8 @@ _ALLOWED_SOURCES = {
     "fiverr.com", "upwork.com",
     # Discovery
     "producthunt.com", "github.com",
+    # Finance
+    "sebi.gov.in",
 }
 
 

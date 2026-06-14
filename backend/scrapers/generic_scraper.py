@@ -238,9 +238,9 @@ class GenericScraper:
         """
         ctx = await asyncio.wait_for(
             self._browser.new_context(locale="en-IN"),
-            timeout=15.0,
+            timeout=60.0,
         )
-        return await asyncio.wait_for(ctx.new_page(), timeout=15.0)
+        return await asyncio.wait_for(ctx.new_page(), timeout=60.0)
 
     async def _close_page_ctx(self, page) -> None:
         """Safely close a page and its isolated context."""

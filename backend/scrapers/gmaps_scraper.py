@@ -242,7 +242,7 @@ class GMapsScraperV2:
                 try:
                     lead, areas = await self._extract(page, listing, city, area, query)
                     if lead:
-                        h = _dedup_key(lead["name"], lead.get("phone", ""), city)
+                        h = _dedup_key(lead["business_name"], lead.get("phone_number", ""), city)
                         if h not in seen:
                             seen.add(h)
                             lead["id"] = str(uuid.uuid4())
@@ -265,186 +265,140 @@ class GMapsScraperV2:
             card_text = (await listing.inner_text()).strip()
             card_name = card_text.splitlines()[0].strip() if card_text else ""
 
-            # Fast-reject closed businesses from the card text
             if _is_closed(card_text):
                 return None, []
-
-            await listing.click(force=True, position={"x": 15, "y": 15})
-
-            # Poll until the details panel shows a name matching the card
-            name = ""
-            for _ in range(10):
-                for sel in ["h1.DUwDvf", ".fontHeadlineLarge", "h1.qAWA2"]:
-                    el = await page.query_selector(sel)
-                    if el:
-                        current = (await el.inner_text()).strip()
-                        if current and current.lower() != "results":
-                            cn, pn = _normalize(card_name), _normalize(current)
-                            if cn in pn or pn in cn:
+                
+            link = await listing.query_selector("a.hfpxzc")
+            if not link: return None, []
+            href = await link.get_attribute("href")
+            if not href: return None, []
+            
+            detail_page = await self._new_page()
+            try:
+                print(f"Navigating to {href[:60]}...")
+                # 15s timeout because maps can be slow, but usually domcontentloaded is instant
+                await detail_page.goto(href, wait_until="domcontentloaded", timeout=15000)
+                print(f"Loaded {card_name[:20]}")
+                import asyncio
+                import random
+                await asyncio.sleep(1.0)
+                
+                name = ""
+                for _ in range(10):
+                    for sel in ["h1.DUwDvf", ".fontHeadlineLarge", "h1.qAWA2"]:
+                        el = await detail_page.query_selector(sel)
+                        if el:
+                            current = (await el.inner_text()).strip()
+                            if current and current.lower() != "results":
                                 name = current
                                 break
-                if name:
-                    break
-                await asyncio.sleep(0.2)
+                    if name: break
+                    await asyncio.sleep(0.5)
+                
+                if not name: return None, []
 
-            if not name:
-                return None, []
-
-            cn, pn = _normalize(card_name), _normalize(name)
-            name_matches = (
-                cn in pn or pn in cn
-                or (len(cn) > 5 and cn[:int(len(cn) * 0.6)] in pn)
-                or (len(pn) > 5 and pn[:int(len(pn) * 0.6)] in cn)
-            )
-            if not name_matches:
-                return None, []
-
-            # Double-check panel for closed status
-            panel_text = ""
-            try:
-                panel_text = (await page.inner_text("div.m6QErb", timeout=1500)).lower()
-            except Exception:
-                pass
-            if _is_closed(panel_text):
-                return None, []
-
-            try:
-                if await page.query_selector('[aria-label*="Permanently closed"]'):
-                    return None, []
-            except Exception:
-                pass
-
-            # Extract Phone
-            phone = ""
-            phone_el = await page.query_selector('[data-item-id*="phone"] .Io6YTe')
-            if phone_el:
-                phone = re.sub(r"[^\d+\-\s]", "", (await phone_el.inner_text()).strip())
-
-            # Extract Address
-            address = ""
-            addr_el = await page.query_selector('[data-item-id="address"] .Io6YTe')
-            if addr_el:
-                address = (await addr_el.inner_text()).strip()
-            new_areas = _extract_areas_from_address(address, city)
-
-            # Extract Rating & Review count
-            rating, review_count = None, None
-            rating_el = await page.query_selector('.F7nice span[aria-label*="star"]')
-            if rating_el:
-                m = re.search(r"([\d.]+)\s+star", await rating_el.get_attribute("aria-label") or "")
-                if m:
-                    rating = float(m.group(1))
-            review_el = await page.query_selector('.F7nice span[aria-label*="review"]')
-            if review_el:
-                m = re.search(r"([\d,]+)\s+review", await review_el.get_attribute("aria-label") or "")
-                if m:
-                    review_count = int(m.group(1).replace(",", ""))
-
-            # Extract Category
-            category = None
-            for sel in [".DkEaL", ".y7PRA", "button.DkEaL"]:
-                el = await page.query_selector(sel)
-                if el:
-                    t = (await el.inner_text()).strip()
-                    if t and len(t) < 60:
-                        category = t
-                        break
-
-            # Extract Open/Closed status
-            open_now = None
-            try:
-                hours_el = await page.query_selector(".o0Svhf")
-                if hours_el:
-                    t = (await hours_el.inner_text()).lower()
-                    open_now = True if "open now" in t else (False if "closed" in t else None)
-            except Exception:
-                pass
-
-            # Extract Website and Social Links
-            website, social_links = "", []
-            _SOCIAL_DOMAINS = [
-                "justdial.com", "facebook.com", "instagram.com", "linkedin.com",
-                "linktr.ee", "twitter.com", "x.com", "wa.me", "whatsapp.com", "youtube.com",
-            ]
-            for sel in ['a[data-item-id="authority"]', '[data-item-id="authority"] a']:
-                web_el = await page.query_selector(sel)
-                if web_el:
-                    href = await web_el.get_attribute("href") or ""
-                    if href and "google.com/maps" not in href and "google.com/search" not in href:
-                        lower = href.lower()
-                        if any(d in lower for d in _SOCIAL_DOMAINS):
-                            social_links.append(href)
-                        else:
-                            website = href
-                    break
-
-            try:
-                profiles = await page.query_selector_all(
-                    'a[href*="instagram.com"], a[href*="facebook.com"], '
-                    'a[href*="linkedin.com"], a[href*="youtube.com"], a[href*="justdial.com"]'
+                cn, pn = _normalize(card_name), _normalize(name)
+                name_matches = (
+                    cn in pn or pn in cn
+                    or (len(cn) > 5 and cn[:int(len(cn) * 0.6)] in pn)
+                    or (len(pn) > 5 and pn[:int(len(pn) * 0.6)] in cn)
                 )
-                for p in profiles:
-                    href = await p.get_attribute("href")
-                    if href and "google.com" not in href and href not in social_links and href != website:
-                        if any(d in href.lower() for d in _SOCIAL_DOMAINS):
-                            social_links.append(href)
-            except Exception:
-                pass
+                if not name_matches:
+                    return None, []
 
-            # Build confidence score
-            confidence = 55
-            evidence = []
-            if name_matches:
-                confidence += 25; evidence.append("name matched card")
-            if phone:
-                confidence += 8; evidence.append("phone found")
-            if address and city.lower() in address.lower():
-                confidence += 8; evidence.append("city in address")
-            if website:
-                confidence += 4; evidence.append("website found")
-            if category:
-                confidence += 5; evidence.append(f"category: {category}")
-            confidence = min(confidence, 100)
+                panel_text = ""
+                try:
+                    panel_text = (await detail_page.inner_text("div.m6QErb", timeout=1500)).lower()
+                except Exception:
+                    pass
+                if _is_closed(panel_text):
+                    return None, []
 
-            return {
-                "name": name,
-                "phone": phone or None,
-                "address": address or None,
-                "city": city,
-                "area": area,
-                "query": query,
-                "source_query": query,
-                "source_city": city,
-                "source_area": area,
-                "google_maps_url": page.url,
-                "website": website or None,
-                "website_domain": _display_domain(website),
-                "rating": rating,
-                "review_count": review_count,
-                "category": category,
-                "open_now": open_now,
-                "permanently_closed": False,
-                "source": "Google Maps",
-                "lead_type": "Website found" if website else "No website on Google Maps",
-                "confidence": confidence,
-                "evidence": "; ".join(evidence),
-                "website_status": None,
-                "has_https": None,
-                "has_mobile_meta": None,
-                "social_links": ", ".join(social_links),
-                "has_instagram": any("instagram.com" in s for s in social_links),
-                "instagram_handle": next(
-                    (s.split("instagram.com/")[1].strip("/") for s in social_links if "instagram.com/" in s),
-                    None,
-                ),
-                "has_zomato": False,
-                "has_swiggy": False,
-                "score": 0,
-                "priority": "Medium",
-            }, new_areas
+                try:
+                    if await detail_page.query_selector('[aria-label*="Permanently closed"]'):
+                        return None, []
+                except Exception:
+                    pass
 
+                import re
+                phone = ""
+                phone_el = await detail_page.query_selector('[data-item-id*="phone"] .Io6YTe')
+                if phone_el:
+                    phone = re.sub(r"[^\d+\-\s]", "", (await phone_el.inner_text()).strip())
+
+                address = ""
+                addr_el = await detail_page.query_selector('[data-item-id="address"] .Io6YTe')
+                if addr_el:
+                    address = (await addr_el.inner_text()).strip()
+                new_areas = _extract_areas_from_address(address, city)
+
+                rating, review_count = None, None
+                rating_el = await detail_page.query_selector('.F7nice span[aria-label*="star"]')
+                if rating_el:
+                    m = re.search(r"([\d.]+)\s+star", await rating_el.get_attribute("aria-label") or "")
+                    if m:
+                        rating = float(m.group(1))
+                review_el = await detail_page.query_selector('.F7nice span[aria-label*="review"]')
+                if review_el:
+                    m = re.search(r"([\d,]+)\s+review", await review_el.get_attribute("aria-label") or "")
+                    if m:
+                        review_count = int(m.group(1).replace(",", ""))
+
+                category = None
+                for sel in [".DkEaL", ".y7PRA", "button.DkEaL"]:
+                    el = await detail_page.query_selector(sel)
+                    if el:
+                        t = (await el.inner_text()).strip()
+                        if t and len(t) < 60:
+                            category = t
+                            break
+
+                open_now = None
+                try:
+                    hours_el = await detail_page.query_selector(".o0Svhf")
+                    if hours_el:
+                        t = (await hours_el.inner_text()).lower()
+                        open_now = True if "open now" in t else (False if "closed" in t else None)
+                except Exception:
+                    pass
+
+                website, social_links = "", []
+                _SOCIAL_DOMAINS = [
+                    "justdial.com", "facebook.com", "instagram.com", "linkedin.com",
+                    "linktr.ee", "twitter.com", "x.com", "wa.me", "whatsapp.com", "youtube.com",
+                ]
+                for sel in ['a[data-item-id="authority"]', '[data-item-id="authority"] a']:
+                    web_el = await detail_page.query_selector(sel)
+                    if web_el:
+                        h = await web_el.get_attribute("href") or ""
+                        if h and "google.com/maps" not in h and "google.com/search" not in h:
+                            lower = h.lower()
+                            if any(d in lower for d in _SOCIAL_DOMAINS):
+                                social_links.append(h)
+                            else:
+                                website = h
+
+                lead = {
+                    "business_name": name,
+                    "phone_number": phone,
+                    "address": address,
+                    "website": website,
+                    "rating": rating,
+                    "review_count": review_count,
+                    "category": category,
+                    "social_links": social_links,
+                    "open_now": open_now,
+                    "query_used": query,
+                    "city": city,
+                    "source": "gmaps"
+                }
+                print(f"Extracted: {name}")
+                return lead, new_areas
+            finally:
+                if 'detail_page' in locals() and detail_page:
+                    await _close_page_ctx(detail_page)
         except Exception as e:
-            logger.debug(f"Extraction error: {e}")
+            print(f"Extract Exception: {e}")
             return None, []
 
     async def find_instagram(self, name: str, city: str) -> tuple[bool, Optional[str]]:
@@ -464,3 +418,4 @@ class GMapsScraperV2:
         finally:
             if page:
                 await _close_page_ctx(page)
+

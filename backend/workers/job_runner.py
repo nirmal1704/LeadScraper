@@ -13,6 +13,7 @@ from firebase_config import get_db
 from llm.query_generator import generate_search_plan
 from scrapers.gmaps_scraper import GMapsScraperV2
 from scrapers.generic_scraper import GenericScraper
+from scrapers.sebi_scraper import SebiScraper
 from enrichment.website_checker import check_websites_batch
 from enrichment.scorer import score_leads_batch, apply_filters_batch, normalize_socials, apply_filters
 from enrichment.profile_enricher import enrich_social_profiles
@@ -392,7 +393,60 @@ async def _run_async(user_id: str, job_id: str, user_query: str, sources: list[s
                 await gmaps.stop()
                 gc.collect()
 
+        # ── SEBI phase ────────────────────────────────────────────────────────
+        if "sebi.gov.in" in active_sources and not stop() and len(all_leads) < max_leads:
+            log("--- SEBI Registry phase ---")
+            sebi_scraper = SebiScraper()
+            await sebi_scraper.start()
+            try:
+                remaining = max_leads - len(all_leads)
+                raw_sebi = await sebi_scraper.scrape(max_leads=remaining)
+                n = await _process_leads(raw_sebi, intent=lead_intent)
+                await _tick("SEBI Registry", n)
+                
+                # SEBI Dorking: Find website and instagram for leads without them
+                # Only activate if the user explicitly asked for websites or socials
+                query_lower = user_query.lower()
+                cares_about_web = any(w in query_lower for w in ["website", "site", "domain", "instagram", "social"])
+                for f in active_filters:
+                    if f.get("field") in ("website", "website_status", "has_https", "has_mobile_meta", "has_instagram"):
+                        cares_about_web = True
+                        break
+                
+                sebi_leads = [l for l in all_leads if l.get("source") == "sebi.gov.in"]
+                if cares_about_web and sebi_leads and not stop():
+                    log(f"Dorking for websites/socials for {len(sebi_leads)} SEBI leads...")
+                    dork_sem = asyncio.Semaphore(1)
+                    
+                    async def _dork_sebi(lead: dict):
+                        if stop(): return
+                        async with dork_sem:
+                            # Find website
+                            if not lead.get("website"):
+                                web = await sebi_scraper.find_website(lead["name"], lead.get("city", "India"))
+                                if web:
+                                    lead["website"] = web
+                                    lead["lead_type"] = "SEBI Advisor (Website found)"
+                                    
+                            # Find instagram
+                            has_ig, handle = await sebi_scraper.find_instagram(lead["name"], lead.get("city", "India"))
+                            if has_ig:
+                                lead["has_instagram"] = True
+                                lead["instagram_handle"] = handle
+                                lead["confidence"] = max(lead.get("confidence") or 0, 75)
+                                
+                    await asyncio.gather(*[_dork_sebi(l) for l in sebi_leads], return_exceptions=True)
+                    score_leads_batch(sebi_leads)
+                    await asyncio.to_thread(_save_leads, db, user_id, job_id, sebi_leads, True)
+                    
+            except Exception as e:
+                _log_error(db, user_id, job_id, "sebi.gov.in", "financial advisor", "", str(e))
+            finally:
+                await sebi_scraper.stop()
+                gc.collect()
+
         # ── Generic / social web phase ────────────────────────────────────────
+        generic_sources = [s for s in generic_sources if s != "sebi.gov.in"]
         run_generic = bool(generic_sources) or should_run_web
         if run_generic and not stop() and len(all_leads) < max_leads:
             log("--- Generic web phase (httpx/DDG mode on free tier) ---" if RENDER_FREE_TIER else "--- Generic web phase: parallel ---")
