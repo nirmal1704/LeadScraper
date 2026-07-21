@@ -179,9 +179,9 @@ def _validate_plan(plan: dict) -> dict:
             "web_first" if plan["lead_intent"] == "online" else "maps_first"
         )
 
-    # Clean and cap lists
-    plan["cities"] = _clean_cities(plan.get("cities") or [])[:6] or defaults["cities"]
-    plan["search_queries"] = _clean_queries(plan.get("search_queries") or [], plan["cities"])[:12]
+    # Clean and cap lists to prevent OOM on Playwright (Render free tier)
+    plan["cities"] = _clean_cities(plan.get("cities") or [])[:3] or defaults["cities"]
+    plan["search_queries"] = _clean_queries(plan.get("search_queries") or [], plan["cities"])[:4]
     if not plan["search_queries"]:
         plan["search_queries"] = defaults["search_queries"]
 
