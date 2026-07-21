@@ -117,6 +117,7 @@ def _get_llm():
         _llm = ChatGroq(
             model="qwen/qwen3.6-27b",
             temperature=0.2,
+            max_tokens=4000,
             api_key=os.getenv("GROQ_API_KEY"),
         )
     return _llm
@@ -131,8 +132,13 @@ def generate_search_plan(user_query: str) -> dict:
             ("system", SYSTEM_PROMPT),
             ("human", USER_PROMPT),
         ])
-        chain = prompt | _get_llm() | JsonOutputParser()
-        result = chain.invoke({"user_query": user_query})
+        chain = prompt | _get_llm()
+        raw_result = chain.invoke({"user_query": user_query}).content
+        if "</think>" in raw_result:
+            raw_result = raw_result.split("</think>")[-1]
+        
+        parser = JsonOutputParser()
+        result = parser.invoke(raw_result)
         logger.info(f"LLM plan generated: intent={result.get('lead_intent')}, "
                     f"strategy={result.get('search_strategy')}, "
                     f"cities={result.get('cities')}, "
