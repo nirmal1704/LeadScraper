@@ -59,7 +59,7 @@ _job_semaphore = threading.Semaphore(MAX_CONCURRENT_JOBS)
 # Free tier: 1 page (safest, ~250MB peak)
 # Full tier: 2 pages (faster, ~400MB peak)
 RENDER_FREE_TIER: bool = os.getenv("RENDER_FREE_TIER", "false").lower() == "true"
-GMAPS_PAGE_CONCURRENCY: int = 1 if RENDER_FREE_TIER else 2
+GMAPS_PAGE_CONCURRENCY: int = 1  # Strictly 1 to prevent OOM with large query plans
 GENERIC_CONCURRENCY: int = 1   # Always 1 — generic browser is lighter
 
 # Firestore write buffer — commit every N leads to cut round-trips

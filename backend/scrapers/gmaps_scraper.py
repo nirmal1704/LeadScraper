@@ -117,7 +117,7 @@ class GMapsScraperV2:
                 "--disable-webgl",
                 "--disable-3d-apis",
                 "--disable-software-rasterizer",
-                "--js-flags=--max-old-space-size=48",
+                "--js-flags=--max-old-space-size=256",
             ],
         )
 
@@ -168,6 +168,10 @@ class GMapsScraperV2:
         all_leads: list[dict] = []
         seen_hashes: set[str] = set()
         discovered: set[str] = set()
+        
+        # Initialize restart counter
+        if not hasattr(self, '_restart_counter'):
+            self._restart_counter = 0
 
         # Load known areas — static dict first, then Firestore, then LLM bootstrap
         known_areas = set(_get_seed_areas(city, db=self.db))
@@ -210,6 +214,15 @@ class GMapsScraperV2:
                 query, city, area, seen_hashes, limit=remaining
             )
             all_leads.extend(leads)
+            
+            self._restart_counter += 1
+            if self._restart_counter >= 5:
+                self.progress("♻️  Recycling browser to free memory...")
+                await self.stop()
+                import gc
+                gc.collect()
+                await self.start()
+                self._restart_counter = 0
 
             # Queue newly discovered areas (from addresses)
             new_discovered = []
