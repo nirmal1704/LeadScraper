@@ -34,7 +34,7 @@ SYSTEM_PROMPT = """You are a world-class lead generation strategist and expert i
 
 Given a user's description of the leads they want, return a valid JSON object with EXACTLY these fields:
 
-{
+{{
   "segment": "plain-English description of the target business segment",
   "lead_intent": "physical" | "online" | "hybrid",
   "search_strategy": "maps_first" | "web_first" | "both",
@@ -46,7 +46,7 @@ Given a user's description of the leads they want, return a valid JSON object wi
   "max_areas": 5,
   "filters": [],
   "exclude_terms": ["directory", "top 10", ...]
-}
+}}
 
 === FIELD RULES ===
 
@@ -115,7 +115,7 @@ def _get_llm():
     global _llm
     if _llm is None:
         _llm = ChatGroq(
-            model="llama-3.3-70b-versatile",
+            model="qwen/qwen3.6-27b",
             temperature=0.2,
             api_key=os.getenv("GROQ_API_KEY"),
         )
